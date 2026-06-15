@@ -697,7 +697,7 @@ while ($rq && ($r = mysqli_fetch_assoc($rq))) $recent[] = $r;
                         <hr class="my-3">
                         <div class="row g-3">
                             <div class="col-md-6"><label class="form-label fw-bold small">Architects / Consultants</label><input type="text" name="architects" class="form-control rounded-4" placeholder="Enter architects / consultants"></div>
-                            <div class="col-md-6"><label class="form-label fw-bold small">PMS</label><input type="text" name="pmc" class="form-control rounded-4" value="<?= e($formPmc) ?>"></div>
+                            <div class="col-md-6"><label class="form-label fw-bold small">PMC</label><input type="text" name="pmc" class="form-control rounded-4" value="<?= e($formPmc) ?>"></div>
                         </div>
                     <?php endif; ?>
                 </div>

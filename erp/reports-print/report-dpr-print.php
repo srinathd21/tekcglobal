@@ -404,7 +404,7 @@ class DPRPDF extends FPDF {
     $rows = [
       ['Project', $this->meta['project_name'] ?? ''],
       ['Client',  $this->meta['client_name'] ?? ''],
-      ['PMS',     $this->meta['pms_name'] ?? ''],
+      ['PMC',     $this->meta['pms_name'] ?? ''],
       ['DPR No / Date', $this->meta['dpr_no'] . ' / ' . trim((string)($this->meta['dpr_date'] ?? ''))],
     ];
 

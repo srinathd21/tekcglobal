@@ -568,6 +568,147 @@ function rh_ensure_dar_submission_row($conn, $darRow, $reportTypeId, $periodStar
     return (int)mysqli_insert_id($conn);
 }
 
+
+
+function rh_table_exists($conn, $tableName)
+{
+    $tableName = preg_replace('/[^a-zA-Z0-9_]/', '', (string)$tableName);
+    if ($tableName === "") {
+        return false;
+    }
+
+    $q = mysqli_query($conn, "SHOW TABLES LIKE '" . mysqli_real_escape_string($conn, $tableName) . "'");
+    return $q && mysqli_num_rows($q) > 0;
+}
+
+function rh_first_existing_col($cols, $names)
+{
+    foreach ($names as $name) {
+        if (isset($cols[$name])) {
+            return $name;
+        }
+    }
+
+    return "";
+}
+
+function rh_direct_report_config($reportCode)
+{
+    $code = strtoupper((string)$reportCode);
+
+    $map = [
+        "DAR" => ["table" => "dar_reports", "id" => "id", "date" => "dar_date", "employee" => "employee_id", "no" => "dar_no"],
+        "DPR" => ["table" => "dpr_reports", "id" => "id", "date" => "dpr_date", "employee" => "employee_id", "no" => "dpr_no"],
+        "MOM" => ["table" => "mom_main", "id" => "id", "date" => "mom_date", "employee" => "created_by", "no" => "mom_no"],
+        "MA" => ["table" => "ma_reports", "id" => "id", "date" => "ma_date", "employee" => "employee_id", "no" => "ma_no"],
+        "MPT" => ["table" => "mpt_reports", "id" => "id", "date" => "mpt_date", "employee" => "employee_id", "no" => "mpt_no"],
+        "DLAR" => ["table" => "dlar_reports", "id" => "id", "date" => "report_date", "employee" => "employee_id", "no" => "dlar_no"],
+        "RFI" => ["table" => "rfi_reports", "id" => "id", "date" => "rfi_date", "employee" => "employee_id", "no" => "rfi_no"],
+        "SAT" => ["table" => "sat_reports", "id" => "id", "date" => "sat_date", "employee" => "employee_id", "no" => "sat_no"],
+        "WPT" => ["table" => "wpt_reports", "id" => "id", "date" => "wpt_date", "employee" => "employee_id", "no" => "wpt_no"],
+        "AIT" => ["table" => "ait_reports", "id" => "id", "date" => "ait_date", "employee" => "employee_id", "no" => "ait_no"],
+    ];
+
+    return $map[$code] ?? null;
+}
+
+function rh_direct_report_submission($conn, $report, $projectId, $periodStart, $periodEnd, $selectedDate)
+{
+    $config = rh_direct_report_config($report["report_code"] ?? "");
+    if (!$config) {
+        return null;
+    }
+
+    $table = $config["table"];
+    if (!rh_table_exists($conn, $table)) {
+        return null;
+    }
+
+    $cols = rh_table_columns($conn, $table);
+
+    $idCol = isset($cols[$config["id"]]) ? $config["id"] : "id";
+    $dateCol = isset($cols[$config["date"]]) ? $config["date"] : rh_first_existing_col($cols, ["report_date", "date", "created_at"]);
+    if ($dateCol === "") {
+        return null;
+    }
+
+    $employeeCol = isset($cols[$config["employee"]]) ? $config["employee"] : rh_first_existing_col($cols, ["employee_id", "created_by"]);
+    $noCol = isset($cols[$config["no"]]) ? $config["no"] : rh_first_existing_col($cols, ["report_no", "submission_no", "mom_no", "ma_no", "mpt_no"]);
+
+    $projectId = (int)$projectId;
+    $frequencyType = (string)($report["frequency_type"] ?? "");
+    $periodStartEsc = mysqli_real_escape_string($conn, $periodStart ?: $selectedDate);
+    $periodEndEsc = mysqli_real_escape_string($conn, $periodEnd ?: $selectedDate);
+    $selectedDateEsc = mysqli_real_escape_string($conn, $selectedDate);
+
+    $where = ["r.project_id = $projectId"];
+
+    if (isset($cols["deleted_at"])) {
+        $where[] = "r.deleted_at IS NULL";
+    }
+
+    if ($frequencyType === "weekly" || $frequencyType === "custom_days") {
+        $where[] = "DATE(r.`$dateCol`) BETWEEN '$periodStartEsc' AND '$periodEndEsc'";
+    } elseif ($frequencyType === "monthly") {
+        if (isset($cols["mpt_month"]) && isset($cols["mpt_year"])) {
+            $month = (int)date("n", strtotime($periodStart ?: $selectedDate));
+            $year = (int)date("Y", strtotime($periodStart ?: $selectedDate));
+            $where[] = "(r.mpt_month = $month AND r.mpt_year = $year)";
+        } else {
+            $where[] = "DATE(r.`$dateCol`) BETWEEN '$periodStartEsc' AND '$periodEndEsc'";
+        }
+    } else {
+        $where[] = "DATE(r.`$dateCol`) = '$selectedDateEsc'";
+    }
+
+    $employeeSelect = $employeeCol !== "" ? "r.`$employeeCol` AS submitted_employee_id" : "0 AS submitted_employee_id";
+    $noSelect = $noCol !== "" ? "r.`$noCol` AS report_no_value" : "'' AS report_no_value";
+
+    $q = mysqli_query($conn, "
+        SELECT r.*, $employeeSelect, $noSelect, emp.full_name AS submitted_by_name
+        FROM `$table` r
+        LEFT JOIN employees emp ON emp.id = " . ($employeeCol !== "" ? "r.`$employeeCol`" : "0") . "
+        WHERE " . implode(" AND ", $where) . "
+        ORDER BY r.`$idCol` DESC
+        LIMIT 1
+    ");
+
+    if (!$q || !($row = mysqli_fetch_assoc($q))) {
+        return null;
+    }
+
+    $realId = (int)($row[$idCol] ?? 0);
+    if ($realId <= 0) {
+        return null;
+    }
+
+    $submittedAt = $row["created_at"] ?? $row["updated_at"] ?? date("Y-m-d H:i:s");
+    $submittedDate = $row[$dateCol] ?? $selectedDate;
+
+    return [
+        "id" => $realId,
+        "submitted_by_employee_id" => (int)($row["submitted_employee_id"] ?? 0),
+        "submission_for_date" => $submittedDate,
+        "period_start" => $periodStart ?: $submittedDate,
+        "period_end" => $periodEnd ?: $submittedDate,
+        "submitted_at" => $submittedAt,
+        "created_at" => $submittedAt,
+        "status" => "submitted",
+        "submitted_by_name" => $row["submitted_by_name"] ?? "",
+        "tl_remark" => "",
+        "manager_remark" => "",
+        "report_no" => $row["report_no_value"] ?? "",
+        "report_number" => $row["report_no_value"] ?? "",
+        "submission_no" => $row["report_no_value"] ?? "",
+        "source_table" => $table,
+        "source_id" => $realId,
+        "reference_id" => $realId,
+        "report_reference_table" => $table,
+        "report_reference_id" => $realId,
+    ];
+}
+
+
 $pageMessageType = "";
 $pageMessageText = "";
 
@@ -773,6 +914,19 @@ if ($selectedProject) {
             }
         }
 
+        /*
+         * Compatibility for all report modules:
+         * Some report submit pages save into their own report table
+         * but project_report_submissions may be missing/older.
+         * Check the direct report table before showing Not Submitted.
+         */
+        if (!$submission) {
+            $directSubmission = rh_direct_report_submission($conn, $report, $pid, $periodStart, $periodEnd, $submissionForDate ?: $selectedDate);
+            if ($directSubmission) {
+                $submission = $directSubmission;
+            }
+        }
+
         $printUrl = "";
         if ($submission) {
             if (strtoupper((string)$report["report_code"]) === "DAR" || (($submission["source_table"] ?? "") === "dar_reports")) {
@@ -787,7 +941,7 @@ if ($selectedProject) {
                         $darPrintId = (int)$lookupRow["id"];
                     }
                 }
-                $printUrl = "reports-print/report-dar-print.php?id=" . $darPrintId;
+                $printUrl = "reports-print/report-dar-print.php?view=" . $darPrintId;
             } else {
                 $printFile = rh_print_file_path($report["print_file_name"] ?? "");
 
@@ -880,7 +1034,7 @@ foreach ($hubRows as $row) {
 <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Reports Hub - TEK-C PMC Construction</title>
+    <title>Reports Hub - UKB Construction & Management Pvt Ltd</title>
     <?php include("includes/links.php"); ?>
     <style>
         .page-head-card{background:var(--card-bg);border:1px solid var(--border-soft);border-radius:22px;box-shadow:var(--shadow-card);padding:16px}

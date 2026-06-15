@@ -1,5 +1,5 @@
 <!-- Bootstrap 5 version. Tailwind removed. -->
-<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+<link href="assets/css/bootstrap.min.css" rel="stylesheet">
 
 <!-- Google Font -->
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -13,7 +13,10 @@
 <?php include("theme-colors.php"); ?>
 
 <!-- Lucide Icons -->
-<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+
+<!-- Lucide Icons -->
+<script src="assets/js/lucide.min.js"></script>
 
 <!-- Bootstrap JS Bundle: required for modals, dropdowns, collapse -->
-<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+ <script src="assets/js/bootstrap.bundle.min.js"></script>
+<!-- <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script> -->

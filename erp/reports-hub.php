@@ -127,6 +127,134 @@ function rh_clean_return_url()
     return $url;
 }
 
+
+function rh_print_file_path($fileName)
+{
+    $fileName = trim((string)$fileName);
+
+    if ($fileName === "") {
+        return "";
+    }
+
+    $fileName = str_replace("\\", "/", $fileName);
+    $fileName = ltrim($fileName, "/");
+
+    /*
+     * All report print pages are inside reports-print/.
+     * If DB has only file name, add reports-print/.
+     * If DB already has reports-print/file.php, keep it.
+     * If DB has old/wrong folder path, keep only basename and put it in reports-print/.
+     */
+    if (strpos($fileName, "reports-print/") === 0) {
+        return $fileName;
+    }
+
+    return "reports-print/" . basename($fileName);
+}
+
+function rh_report_print_id($submission)
+{
+    if (!$submission) {
+        return 0;
+    }
+
+    foreach (["report_reference_id", "source_id", "reference_id"] as $key) {
+        if (!empty($submission[$key])) {
+            return (int)$submission[$key];
+        }
+    }
+
+    return (int)($submission["id"] ?? 0);
+}
+
+function rh_mom_print_id($conn, $submission, $projectId, $selectedDate)
+{
+    if (!$submission) {
+        return 0;
+    }
+
+    /*
+     * MOM print page needs mom_main.id.
+     * project_report_submissions.id is different.
+     * Example:
+     *   mom_main.id = 2
+     *   project_report_submissions.id = 6
+     * So never send submission id directly for MOM unless it is verified in mom_main.
+     */
+
+    foreach (["report_reference_id", "source_id", "reference_id"] as $key) {
+        if (!empty($submission[$key])) {
+            $id = (int)$submission[$key];
+            $q = mysqli_query($conn, "SELECT id FROM mom_main WHERE id = $id LIMIT 1");
+            if ($q && mysqli_num_rows($q) > 0) {
+                return $id;
+            }
+        }
+    }
+
+    $projectId = (int)$projectId;
+    $date = mysqli_real_escape_string($conn, $submission["submission_for_date"] ?? $selectedDate);
+    $empId = (int)($submission["submitted_by_employee_id"] ?? 0);
+
+    $reportNoValues = [];
+    foreach (["report_no", "report_number", "submission_no"] as $key) {
+        if (!empty($submission[$key])) {
+            $reportNoValues[] = "'" . mysqli_real_escape_string($conn, (string)$submission[$key]) . "'";
+        }
+    }
+
+    if ($reportNoValues) {
+        $in = implode(",", array_unique($reportNoValues));
+        $q = mysqli_query($conn, "
+            SELECT id
+            FROM mom_main
+            WHERE mom_no IN ($in)
+            ORDER BY id DESC
+            LIMIT 1
+        ");
+        if ($q && ($row = mysqli_fetch_assoc($q))) {
+            return (int)$row["id"];
+        }
+    }
+
+    $empSql = $empId > 0 ? "AND created_by = $empId" : "";
+    $q = mysqli_query($conn, "
+        SELECT id
+        FROM mom_main
+        WHERE project_id = $projectId
+          AND mom_date = '$date'
+          $empSql
+          AND deleted_at IS NULL
+        ORDER BY id DESC
+        LIMIT 1
+    ");
+
+    if ($q && ($row = mysqli_fetch_assoc($q))) {
+        return (int)$row["id"];
+    }
+
+    /*
+     * Last fallback: same project/date, regardless of created_by.
+     * This prevents wrong project_report_submissions.id being used in print URL.
+     */
+    $q = mysqli_query($conn, "
+        SELECT id
+        FROM mom_main
+        WHERE project_id = $projectId
+          AND mom_date = '$date'
+          AND deleted_at IS NULL
+        ORDER BY id DESC
+        LIMIT 1
+    ");
+
+    if ($q && ($row = mysqli_fetch_assoc($q))) {
+        return (int)$row["id"];
+    }
+
+    return 0;
+}
+
+
 function rh_project_hierarchy($conn, $projectId)
 {
     $projectId = (int)$projectId;
@@ -661,7 +789,15 @@ if ($selectedProject) {
                 }
                 $printUrl = "reports-print/report-dar-print.php?id=" . $darPrintId;
             } else {
-                $printUrl = $report["print_file_name"] . "?view=" . (int)$submission["id"];
+                $printFile = rh_print_file_path($report["print_file_name"] ?? "");
+
+                if (strtoupper((string)$report["report_code"]) === "MOM") {
+                    $printId = rh_mom_print_id($conn, $submission, $pid, $submissionForDate ?: $selectedDate);
+                } else {
+                    $printId = rh_report_print_id($submission);
+                }
+
+                $printUrl = ($printFile !== "" && $printId > 0) ? ($printFile . "?view=" . $printId) : "";
             }
         }
 
@@ -907,7 +1043,7 @@ foreach ($hubRows as $row) {
                                             <div class="d-flex flex-wrap gap-2">
                                                 <?php if ($sub && !$isResubmitRequired): ?>
                                                     <?php if ($row["can_view"]): ?>
-                                                        <a href="<?= e($row["print_url"]) ?>" target="_blank" class="btn btn-sm btn-outline-primary rounded-4 fw-bold">Print</a>
+                                                        <?php if (!empty($row["print_url"])): ?><a href="<?= e($row["print_url"]) ?>" target="_blank" class="btn btn-sm btn-outline-primary rounded-4 fw-bold">Print</a><?php endif; ?>
                                                     <?php endif; ?>
 
                                                     <?php if ($remarkAllowed): ?>
@@ -919,7 +1055,7 @@ foreach ($hubRows as $row) {
                                                     <?php endif; ?>
 
                                                     <?php if ($row["can_view"]): ?>
-                                                        <a href="<?= e($row["print_url"]) ?>" target="_blank" class="btn btn-sm btn-outline-secondary rounded-4 fw-bold">Old Print</a>
+                                                        <?php if (!empty($row["print_url"])): ?><a href="<?= e($row["print_url"]) ?>" target="_blank" class="btn btn-sm btn-outline-secondary rounded-4 fw-bold">Old Print</a><?php endif; ?>
                                                     <?php endif; ?>
                                                 <?php else: ?>
                                                     <?php if ($row["can_submit"]): ?>
@@ -996,7 +1132,7 @@ foreach ($hubRows as $row) {
                                 <div class="mt-3 d-flex flex-wrap gap-2">
                                     <?php if ($sub && !$isResubmitRequired): ?>
                                         <?php if ($row["can_view"]): ?>
-                                            <a href="<?= e($row["print_url"]) ?>" target="_blank" class="btn btn-sm btn-outline-primary rounded-4 fw-bold">Print</a>
+                                            <?php if (!empty($row["print_url"])): ?><a href="<?= e($row["print_url"]) ?>" target="_blank" class="btn btn-sm btn-outline-primary rounded-4 fw-bold">Print</a><?php endif; ?>
                                         <?php endif; ?>
                                         <?php if ($remarkAllowed): ?>
                                             <button type="button" class="btn btn-sm btn-outline-warning rounded-4 fw-bold" data-bs-toggle="modal" data-bs-target="#remarkModal" onclick='openRemarkModal(<?= json_encode(["submission_id" => (int)$sub["id"], "report" => $report["report_name"], "level" => $remarkLevel], JSON_HEX_APOS | JSON_HEX_QUOT) ?>)'>Remark</button>
@@ -1006,7 +1142,7 @@ foreach ($hubRows as $row) {
                                             <a href="<?= e($report["submit_file_name"]) ?>?project_id=<?= (int)$projectFilter ?>&report_date=<?= e($selectedDate) ?>&period_start=<?= e($row["period_start"]) ?>&period_end=<?= e($row["period_end"]) ?>&resubmit_submission_id=<?= (int)$sub["id"] ?>" class="btn btn-sm brand-gradient text-white rounded-4 fw-bold">Resubmit</a>
                                         <?php endif; ?>
                                         <?php if ($row["can_view"]): ?>
-                                            <a href="<?= e($row["print_url"]) ?>" target="_blank" class="btn btn-sm btn-outline-secondary rounded-4 fw-bold">Old Print</a>
+                                            <?php if (!empty($row["print_url"])): ?><a href="<?= e($row["print_url"]) ?>" target="_blank" class="btn btn-sm btn-outline-secondary rounded-4 fw-bold">Old Print</a><?php endif; ?>
                                         <?php endif; ?>
                                     <?php else: ?>
                                         <?php if ($row["can_submit"]): ?>

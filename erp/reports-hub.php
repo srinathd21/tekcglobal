@@ -108,14 +108,16 @@ function rh_period($type, $customDays, $date)
 
 function rh_url($overrides = [])
 {
-    $q = array_merge($_GET, $overrides);
+    $q = $_GET;
+    unset($q["saved"], $q["resubmitted"], $q["reminder"], $q["remark"], $q["success"], $q["error"], $q["deleted"], $q["access"]);
+    $q = array_merge($q, $overrides);
     return "reports-hub.php?" . http_build_query($q);
 }
 
 function rh_clean_return_url()
 {
     $params = $_GET;
-    unset($params["reminder"], $params["remark"], $params["success"], $params["error"], $params["deleted"], $params["access"]);
+    unset($params["saved"], $params["resubmitted"], $params["reminder"], $params["remark"], $params["success"], $params["error"], $params["deleted"], $params["access"]);
 
     $url = "reports-hub.php";
     if (!empty($params)) {
@@ -441,12 +443,21 @@ function rh_ensure_dar_submission_row($conn, $darRow, $reportTypeId, $periodStar
 $pageMessageType = "";
 $pageMessageText = "";
 
-if (isset($_GET["reminder"])) {
+if (isset($_GET["saved"])) {
+    $pageMessageType = "success";
+    $pageMessageText = "Report submitted successfully.";
+} elseif (isset($_GET["resubmitted"])) {
+    $pageMessageType = "success";
+    $pageMessageText = "Report resubmitted successfully.";
+} elseif (isset($_GET["reminder"])) {
     $pageMessageType = "success";
     $pageMessageText = "Submit reminder sent successfully.";
 } elseif (isset($_GET["remark"])) {
     $pageMessageType = "success";
     $pageMessageText = "Remark sent successfully.";
+} elseif (isset($_GET["success"])) {
+    $pageMessageType = "success";
+    $pageMessageText = trim($_GET["success"]) !== "" ? trim($_GET["success"]) : "Action completed successfully.";
 } elseif (isset($_GET["error"])) {
     $pageMessageType = "error";
     $pageMessageText = trim($_GET["error"]) !== "" ? trim($_GET["error"]) : "Something went wrong. Please try again.";

@@ -148,16 +148,18 @@ function dar_table_columns($conn, $tableName)
 
 function dar_sql_value($conn, $value)
 {
-  if ($value === null) return "NULL";
-  if (is_int($value) || is_float($value)) return (string)$value;
-  return "'" . mysqli_real_escape_string($conn, (string)$value) . "'";
+  if ($value === null)
+    return "NULL";
+  if (is_int($value) || is_float($value))
+    return (string) $value;
+  return "'" . mysqli_real_escape_string($conn, (string) $value) . "'";
 }
 
 function dar_report_type_id($conn)
 {
   $q = mysqli_query($conn, "SELECT id FROM master_report_types WHERE report_code='DAR' LIMIT 1");
   if ($q && ($row = mysqli_fetch_assoc($q))) {
-    return (int)$row["id"];
+    return (int) $row["id"];
   }
   return 0;
 }
@@ -165,9 +167,9 @@ function dar_report_type_id($conn)
 
 function dar_existing_for_resubmit($conn, $submissionId, $projectId, $employeeId, $darDate)
 {
-  $submissionId = (int)$submissionId;
-  $projectId = (int)$projectId;
-  $employeeId = (int)$employeeId;
+  $submissionId = (int) $submissionId;
+  $projectId = (int) $projectId;
+  $employeeId = (int) $employeeId;
   $darDateEsc = mysqli_real_escape_string($conn, $darDate);
 
   if ($submissionId > 0) {
@@ -190,16 +192,16 @@ function dar_existing_for_resubmit($conn, $submissionId, $projectId, $employeeId
     if ($q && ($sub = mysqli_fetch_assoc($q))) {
       foreach (["report_reference_id", "source_id", "reference_id"] as $refCol) {
         if (!empty($sub[$refCol])) {
-          $refId = (int)$sub[$refCol];
+          $refId = (int) $sub[$refCol];
           $darQ = mysqli_query($conn, "SELECT id FROM dar_reports WHERE id = $refId LIMIT 1");
           if ($darQ && ($dar = mysqli_fetch_assoc($darQ))) {
-            return (int)$dar["id"];
+            return (int) $dar["id"];
           }
         }
       }
 
-      $subProjectId = (int)($sub["project_id"] ?? 0);
-      $subEmployeeId = (int)($sub["submitted_by_employee_id"] ?? 0);
+      $subProjectId = (int) ($sub["project_id"] ?? 0);
+      $subEmployeeId = (int) ($sub["submitted_by_employee_id"] ?? 0);
       $subDate = $sub["submission_for_date"] ?: ($sub["period_start"] ?: $darDate);
 
       if ($subProjectId > 0 && $subDate) {
@@ -215,7 +217,7 @@ function dar_existing_for_resubmit($conn, $submissionId, $projectId, $employeeId
           LIMIT 1
         ");
         if ($darQ && ($dar = mysqli_fetch_assoc($darQ))) {
-          return (int)$dar["id"];
+          return (int) $dar["id"];
         }
       }
     }
@@ -232,7 +234,7 @@ function dar_existing_for_resubmit($conn, $submissionId, $projectId, $employeeId
   ");
 
   if ($darQ && ($dar = mysqli_fetch_assoc($darQ))) {
-    return (int)$dar["id"];
+    return (int) $dar["id"];
   }
 
   return 0;
@@ -240,13 +242,13 @@ function dar_existing_for_resubmit($conn, $submissionId, $projectId, $employeeId
 
 function dar_mark_resubmitted($conn, $submissionId, $projectId, $employeeId, $darDate, $darId)
 {
-  $submissionId = (int)$submissionId;
-  $projectId = (int)$projectId;
-  $employeeId = (int)$employeeId;
-  $darId = (int)$darId;
+  $submissionId = (int) $submissionId;
+  $projectId = (int) $projectId;
+  $employeeId = (int) $employeeId;
+  $darId = (int) $darId;
   $reportTypeId = dar_report_type_id($conn);
   $darDateEsc = mysqli_real_escape_string($conn, $darDate);
-  $userId = (int)($_SESSION["user_id"] ?? 0);
+  $userId = (int) ($_SESSION["user_id"] ?? 0);
 
   if ($reportTypeId <= 0 || $projectId <= 0 || $employeeId <= 0 || $darDate === "") {
     return;
@@ -270,27 +272,50 @@ function dar_mark_resubmitted($conn, $submissionId, $projectId, $employeeId, $da
       LIMIT 1
     ");
     if ($q && ($row = mysqli_fetch_assoc($q))) {
-      $targetSubmissionId = (int)$row["id"];
+      $targetSubmissionId = (int) $row["id"];
     }
   }
 
   if ($targetSubmissionId > 0) {
     $sets = [];
 
-    if (isset($cols["status"])) $sets[] = "status = 'submitted'";
-    if (isset($cols["submitted_at"])) $sets[] = "submitted_at = NOW()";
-    if (isset($cols["submitted_by_employee_id"])) $sets[] = "submitted_by_employee_id = $employeeId";
-    if (isset($cols["submitted_by_user_id"])) $sets[] = "submitted_by_user_id = $userId";
-    if (isset($cols["submission_for_date"])) $sets[] = "submission_for_date = '$darDateEsc'";
-    if (isset($cols["period_start"])) $sets[] = "period_start = '$darDateEsc'";
-    if (isset($cols["period_end"])) $sets[] = "period_end = '$darDateEsc'";
-    if (isset($cols["reference_id"])) $sets[] = "reference_id = $darId";
-    if (isset($cols["source_id"])) $sets[] = "source_id = $darId";
-    if (isset($cols["source_table"])) $sets[] = "source_table = 'dar_reports'";
-    if (isset($cols["report_reference_id"])) $sets[] = "report_reference_id = $darId";
-    if (isset($cols["report_reference_table"])) $sets[] = "report_reference_table = 'dar_reports'";
-    if (isset($cols["updated_by"])) $sets[] = "updated_by = $userId";
-    if (isset($cols["updated_at"])) $sets[] = "updated_at = NOW()";
+    $safeReportNo = "DAR-" . $projectId . "-" . str_replace("-", "", $darDate) . "-" . $darId;
+
+    if (isset($cols["report_no"]))
+      $sets[] = "report_no = '" . mysqli_real_escape_string($conn, $safeReportNo) . "'";
+    if (isset($cols["report_number"]))
+      $sets[] = "report_number = '" . mysqli_real_escape_string($conn, $safeReportNo) . "'";
+    if (isset($cols["submission_no"]))
+      $sets[] = "submission_no = '" . mysqli_real_escape_string($conn, $safeReportNo) . "'";
+
+    if (isset($cols["status"]))
+      $sets[] = "status = 'submitted'";
+    if (isset($cols["submitted_at"]))
+      $sets[] = "submitted_at = NOW()";
+    if (isset($cols["submitted_by_employee_id"]))
+      $sets[] = "submitted_by_employee_id = $employeeId";
+    if (isset($cols["submitted_by_user_id"]))
+      $sets[] = "submitted_by_user_id = $userId";
+    if (isset($cols["submission_for_date"]))
+      $sets[] = "submission_for_date = '$darDateEsc'";
+    if (isset($cols["period_start"]))
+      $sets[] = "period_start = '$darDateEsc'";
+    if (isset($cols["period_end"]))
+      $sets[] = "period_end = '$darDateEsc'";
+    if (isset($cols["reference_id"]))
+      $sets[] = "reference_id = $darId";
+    if (isset($cols["source_id"]))
+      $sets[] = "source_id = $darId";
+    if (isset($cols["source_table"]))
+      $sets[] = "source_table = 'dar_reports'";
+    if (isset($cols["report_reference_id"]))
+      $sets[] = "report_reference_id = $darId";
+    if (isset($cols["report_reference_table"]))
+      $sets[] = "report_reference_table = 'dar_reports'";
+    if (isset($cols["updated_by"]))
+      $sets[] = "updated_by = $userId";
+    if (isset($cols["updated_at"]))
+      $sets[] = "updated_at = NOW()";
 
     if ($sets) {
       mysqli_query($conn, "UPDATE project_report_submissions SET " . implode(", ", $sets) . " WHERE id = $targetSubmissionId");
@@ -299,9 +324,21 @@ function dar_mark_resubmitted($conn, $submissionId, $projectId, $employeeId, $da
     return;
   }
 
+  $darNo = "";
+  $darQ = mysqli_query($conn, "SELECT dar_no FROM dar_reports WHERE id = $darId LIMIT 1");
+  if ($darQ && ($darRow = mysqli_fetch_assoc($darQ))) {
+    $darNo = trim((string)($darRow["dar_no"] ?? ""));
+  }
+
+  $safeReportNo = $darNo !== "" ? $darNo : ("DAR-" . $projectId . "-" . $darDate . "-" . $darId);
+  $safeReportNo = "DAR-" . $projectId . "-" . str_replace("-", "", $darDate) . "-" . $darId;
+
   $data = [
     "project_id" => $projectId,
     "report_type_id" => $reportTypeId,
+    "report_no" => $safeReportNo,
+    "report_number" => $safeReportNo,
+    "submission_no" => $safeReportNo,
     "submitted_by_employee_id" => $employeeId,
     "submitted_by_user_id" => $userId > 0 ? $userId : null,
     "submission_for_date" => $darDate,
@@ -331,8 +368,40 @@ function dar_mark_resubmitted($conn, $submissionId, $projectId, $employeeId, $da
   }
 
   if ($insertCols) {
-    mysqli_query($conn, "INSERT INTO project_report_submissions (" . implode(",", $insertCols) . ") VALUES (" . implode(",", $insertVals) . ")");
+    $updateParts = [];
+    foreach ($insertCols as $colName) {
+      $cleanCol = trim($colName, "`");
+      if (!in_array($cleanCol, ["id", "created_at", "created_by"], true)) {
+        $updateParts[] = "`$cleanCol` = VALUES(`$cleanCol`)";
+      }
+    }
+
+    $insertSql = "INSERT INTO project_report_submissions (" . implode(",", $insertCols) . ") VALUES (" . implode(",", $insertVals) . ")";
+
+    if ($updateParts) {
+      $insertSql .= " ON DUPLICATE KEY UPDATE " . implode(", ", $updateParts);
+    }
+
+    mysqli_query($conn, $insertSql);
   }
+}
+
+
+function dar_redirect_reports_hub($projectId, $darDate, $flag = "saved")
+{
+  $projectId = (int)$projectId;
+  $date = urlencode((string)$darDate);
+  $flag = preg_replace('/[^a-zA-Z0-9_]/', '', (string)$flag);
+
+  header(
+    "Location: reports-hub.php"
+    . "?project_id=" . $projectId
+    . "&report_date=" . $date
+    . "&period_start=" . $date
+    . "&period_end=" . $date
+    . "&" . $flag . "=1"
+  );
+  exit;
 }
 
 if (empty($_SESSION['user_id']) && empty($_SESSION['employee_id'])) {
@@ -516,8 +585,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_dar'])) {
               notify_emp($conn, (int) $si['manager_employee_id'], 'DAR Resubmitted', "$preparedBy resubmitted DAR $darNo for " . $si['project_name'], $existingDarId, "reports-print/report-dar-print.php?id=$existingDarId");
             }
 
-            header('Location: reports-print/report-dar-print.php?id=' . $existingDarId . '&resubmitted=1');
-            exit;
+            dar_redirect_reports_hub($postProject, $darDate, 'resubmitted');
           }
           mysqli_stmt_close($st);
         }
@@ -535,29 +603,28 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_dar'])) {
     if ($err === '') {
       $st = mysqli_prepare($conn, "INSERT INTO dar_reports (project_id,site_id,employee_id,dar_no,dar_date,division,incharge,activities_json,report_distribute_to,prepared_by) VALUES (?,?,?,?,?,?,?,?,?,?)");
       if (!$st) {
-      $err = 'DB Error: ' . mysqli_error($conn);
-    } else {
-      mysqli_stmt_bind_param($st, 'iiisssssss', $postProject, $postProject, $employeeId, $darNo, $darDate, $division, $incharge, $json, $dist, $preparedBy);
-      if (!mysqli_stmt_execute($st)) {
-        $err = 'Failed to save DAR: ' . mysqli_stmt_error($st);
+        $err = 'DB Error: ' . mysqli_error($conn);
       } else {
-        $newId = mysqli_insert_id($conn);
-        mysqli_stmt_close($st);
-        if ($resubmitSubmissionId > 0) {
-          dar_mark_resubmitted($conn, $resubmitSubmissionId, $postProject, $employeeId, $darDate, $newId);
-          log_activity($conn, 'UPDATE', 'Resubmitted DAR ' . $darNo, $newId);
+        mysqli_stmt_bind_param($st, 'iiisssssss', $postProject, $postProject, $employeeId, $darNo, $darDate, $division, $incharge, $json, $dist, $preparedBy);
+        if (!mysqli_stmt_execute($st)) {
+          $err = 'Failed to save DAR: ' . mysqli_stmt_error($st);
         } else {
-          dar_mark_resubmitted($conn, 0, $postProject, $employeeId, $darDate, $newId);
-          log_activity($conn, 'CREATE', 'Submitted DAR ' . $darNo, $newId);
+          $newId = mysqli_insert_id($conn);
+          mysqli_stmt_close($st);
+          if ($resubmitSubmissionId > 0) {
+            dar_mark_resubmitted($conn, $resubmitSubmissionId, $postProject, $employeeId, $darDate, $newId);
+            log_activity($conn, 'UPDATE', 'Resubmitted DAR ' . $darNo, $newId);
+          } else {
+            dar_mark_resubmitted($conn, 0, $postProject, $employeeId, $darDate, $newId);
+            log_activity($conn, 'CREATE', 'Submitted DAR ' . $darNo, $newId);
+          }
+          $siq = mysqli_query($conn, "SELECT project_name,manager_employee_id FROM projects WHERE id=$postProject LIMIT 1");
+          $si = $siq ? mysqli_fetch_assoc($siq) : null;
+          if ($si && !empty($si['manager_employee_id']))
+            notify_emp($conn, (int) $si['manager_employee_id'], 'New DAR Submitted', "$preparedBy submitted DAR $darNo for " . $si['project_name'], $newId, "reports-print/report-dar-print.php?id=$newId");
+          dar_redirect_reports_hub($postProject, $darDate, $resubmitSubmissionId > 0 ? 'resubmitted' : 'saved');
         }
-        $siq = mysqli_query($conn, "SELECT project_name,manager_employee_id FROM projects WHERE id=$postProject LIMIT 1");
-        $si = $siq ? mysqli_fetch_assoc($siq) : null;
-        if ($si && !empty($si['manager_employee_id']))
-          notify_emp($conn, (int) $si['manager_employee_id'], 'New DAR Submitted', "$preparedBy submitted DAR $darNo for " . $si['project_name'], $newId, "reports-print/report-dar-print.php?id=$newId");
-        header('Location: dar.php?project_id=' . $postProject . '&saved=1&dar_id=' . $newId);
-        exit;
-      }
-      mysqli_stmt_close($st);
+        mysqli_stmt_close($st);
       }
     }
   }
@@ -566,18 +633,49 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_dar'])) {
     exit;
   }
 }
+$previousDarTemplate = null;
 $recentTemplate = null;
+
 if ($projectId > 0) {
+  $safeRequestedDate = mysqli_real_escape_string($conn, $requestedReportDate);
+
+  /*
+   * Load previous data for user-friendly copy support:
+   * 1. Prefer the latest DAR before the selected report date.
+   * 2. If there is no earlier DAR, fallback to the latest DAR for this project/user.
+   * This data is loaded into JavaScript JSON and applied only when the user checks
+   * "Load previous data". Unique values like DAR No and Date are not overwritten.
+   */
   $tplQ = mysqli_query($conn, "
     SELECT id, dar_no, dar_date, division, incharge, activities_json, report_distribute_to
     FROM dar_reports
-    WHERE project_id=$projectId AND employee_id=$employeeId
+    WHERE project_id = $projectId
+      AND employee_id = $employeeId
+      AND dar_date < '$safeRequestedDate'
     ORDER BY dar_date DESC, created_at DESC
     LIMIT 1
   ");
+
   if ($tplQ) {
-    $recentTemplate = mysqli_fetch_assoc($tplQ);
+    $previousDarTemplate = mysqli_fetch_assoc($tplQ);
   }
+
+  if (!$previousDarTemplate) {
+    $tplQ = mysqli_query($conn, "
+      SELECT id, dar_no, dar_date, division, incharge, activities_json, report_distribute_to
+      FROM dar_reports
+      WHERE project_id = $projectId
+        AND employee_id = $employeeId
+      ORDER BY dar_date DESC, created_at DESC
+      LIMIT 1
+    ");
+
+    if ($tplQ) {
+      $previousDarTemplate = mysqli_fetch_assoc($tplQ);
+    }
+  }
+
+  $recentTemplate = $previousDarTemplate;
 }
 
 $recent = [];
@@ -677,6 +775,17 @@ while ($rq && $r = mysqli_fetch_assoc($rq)) {
       background: rgba(148, 163, 184, .06)
     }
 
+
+    .badge-soft input[type="checkbox"] {
+      width: 15px;
+      height: 15px;
+      flex: 0 0 auto;
+    }
+
+    .badge-soft span {
+      line-height: 1.15;
+    }
+
     @media(max-width:767px) {
       .dar-table {
         min-width: 900px
@@ -694,10 +803,24 @@ while ($rq && $r = mysqli_fetch_assoc($rq)) {
         <div class="page-head-card mb-3">
           <div class="d-flex flex-column flex-lg-row align-items-lg-center justify-content-lg-between gap-3">
             <div>
-              <h1 class="h4 fw-bold mb-1"><?= $resubmitSubmissionId > 0 ? 'Resubmit Daily Activity Report (DAR)' : 'Daily Activity Report (DAR)' ?></h1>
+              <h1 class="h4 fw-bold mb-1">
+                <?= $resubmitSubmissionId > 0 ? 'Resubmit Daily Activity Report (DAR)' : 'Daily Activity Report (DAR)' ?>
+              </h1>
               <p class="text-muted-custom mb-0 small">Planned, achieved, planned for tomorrow and remarks.</p>
             </div>
-            <div class="d-flex flex-wrap gap-2"><span class="badge-soft"><i data-lucide="user"
+            <div class="d-flex flex-wrap gap-2 align-items-center">
+              <?php if ($previousDarTemplate): ?>
+                <label class="badge-soft mb-0" title="Load previous submitted DAR data without changing DAR No or Date">
+                  <input type="checkbox" class="form-check-input mt-0" id="loadPreviousDarData">
+                  <span>
+                    <strong>Load previous data</strong>
+                    <small class="d-block text-muted-custom fw-semibold">
+                      <?= e($previousDarTemplate['dar_no']) ?> · <?= e(date('d M Y', strtotime($previousDarTemplate['dar_date']))) ?>
+                    </small>
+                  </span>
+                </label>
+              <?php endif; ?>
+              <span class="badge-soft"><i data-lucide="user"
                   style="width:15px;height:15px;"></i><?= e($preparedBy) ?></span><a href="reports-hub.php"
                 class="btn btn-outline-secondary rounded-4 fw-bold btn-sm">Back to Reports Hub</a></div>
           </div>
@@ -759,7 +882,8 @@ while ($rq && $r = mysqli_fetch_assoc($rq)) {
             </div><?php endif; ?>
         </div>
         <form method="POST" autocomplete="off"><input type="hidden" name="submit_dar" value="1"><input type="hidden"
-            name="project_id" value="<?= (int) $projectId ?>"><input type="hidden" name="resubmit_submission_id" value="<?= (int) $resubmitSubmissionId ?>">
+            name="project_id" value="<?= (int) $projectId ?>"><input type="hidden" name="resubmit_submission_id"
+            value="<?= (int) $resubmitSubmissionId ?>">
           <div class="section-box mb-3">
             <div class="mini-head">
               <div class="mini-icon"><i data-lucide="file-text"></i></div>
@@ -797,22 +921,7 @@ while ($rq && $r = mysqli_fetch_assoc($rq)) {
               </div><button type="button" class="btn btn-outline-primary rounded-4 fw-bold" id="addActivity">Add
                 Row</button>
             </div>
-            <?php if ($recentTemplate): ?>
-              <div class="mb-3 p-3 rounded-4"
-                style="border:1px solid var(--border-soft);background:rgba(148,163,184,.06);">
-                <label class="d-flex align-items-start gap-2 mb-0">
-                  <input type="checkbox" class="form-check-input mt-1" id="copyRecentDar">
-                  <span>
-                    <strong>Use recent submitted DAR as template</strong>
-                    <small class="d-block text-muted-custom fw-semibold">
-                      Last DAR: <?= e($recentTemplate['dar_no']) ?> on
-                      <?= e(date('d M Y', strtotime($recentTemplate['dar_date']))) ?>.
-                      This will refill activities, incharge and distribution. DAR No and today's date will stay unchanged.
-                    </small>
-                  </span>
-                </label>
-              </div>
-            <?php endif; ?>
+
             <div class="table-responsive thin-scrollbar">
               <table class="table table-bordered align-middle mb-0 dar-table">
                 <thead>
@@ -893,18 +1002,18 @@ while ($rq && $r = mysqli_fetch_assoc($rq)) {
   </div><?php include('includes/script.php'); ?>
   <script src="assets/js/script.js?v=41"></script>
   <script>
-    const recentDarTemplate = <?php
+    const previousDarTemplate = <?php
     $tplRows = [];
-    if ($recentTemplate && !empty($recentTemplate['activities_json'])) {
+    if ($previousDarTemplate && !empty($previousDarTemplate['activities_json'])) {
       $decoded = json_decode($recentTemplate['activities_json'], true);
       if (is_array($decoded)) {
         $tplRows = $decoded;
       }
     }
     echo json_encode([
-      'division' => $recentTemplate['division'] ?? '',
-      'incharge' => $recentTemplate['incharge'] ?? '',
-      'report_distribute_to' => $recentTemplate['report_distribute_to'] ?? '',
+      'division' => $previousDarTemplate['division'] ?? '',
+      'incharge' => $previousDarTemplate['incharge'] ?? '',
+      'report_distribute_to' => $previousDarTemplate['report_distribute_to'] ?? '',
       'rows' => $tplRows
     ], JSON_UNESCAPED_UNICODE);
     ?>;
@@ -982,12 +1091,12 @@ while ($rq && $r = mysqli_fetch_assoc($rq)) {
         renumberRows();
       });
 
-      document.getElementById('copyRecentDar')?.addEventListener('change', function () {
-        if (!this.checked || !recentDarTemplate) return;
+      function loadPreviousDarData() {
+        if (!previousDarTemplate) return;
 
         const body = document.getElementById('activityBody');
-        const rows = Array.isArray(recentDarTemplate.rows) && recentDarTemplate.rows.length
-          ? recentDarTemplate.rows
+        const rows = Array.isArray(previousDarTemplate.rows) && previousDarTemplate.rows.length
+          ? previousDarTemplate.rows
           : [{}];
 
         body.innerHTML = '';
@@ -995,27 +1104,51 @@ while ($rq && $r = mysqli_fetch_assoc($rq)) {
           body.appendChild(makeActivityRow(rowData));
         });
 
+        /*
+         * Load reusable content only.
+         * Do NOT overwrite unique values:
+         * - DAR No
+         * - DAR Date
+         * - Project ID
+         * - Resubmit submission ID
+         * - Prepared By
+         */
         const division = document.querySelector('[name="division"]');
         const incharge = document.querySelector('[name="incharge"]');
         const distribute = document.querySelector('[name="report_distribute_to"]');
 
-        if (division && recentDarTemplate.division) {
-          division.value = recentDarTemplate.division;
+        if (division && previousDarTemplate.division) {
+          division.value = previousDarTemplate.division;
         }
-        if (incharge && recentDarTemplate.incharge) {
-          incharge.value = recentDarTemplate.incharge;
+
+        if (incharge && previousDarTemplate.incharge) {
+          incharge.value = previousDarTemplate.incharge;
         }
-        if (distribute && recentDarTemplate.report_distribute_to) {
-          distribute.value = recentDarTemplate.report_distribute_to;
+
+        if (distribute && previousDarTemplate.report_distribute_to) {
+          distribute.value = previousDarTemplate.report_distribute_to;
         }
 
         renumberRows();
+      }
+
+      document.getElementById('loadPreviousDarData')?.addEventListener('change', function () {
+        if (this.checked) {
+          loadPreviousDarData();
+        }
+      });
+
+      // Backward compatibility if an older checkbox id still exists in cache/custom copy.
+      document.getElementById('copyRecentDar')?.addEventListener('change', function () {
+        if (this.checked) {
+          loadPreviousDarData();
+        }
       });
 
       renumberRows();
     });
   </script>
-  
+
 </body>
 
 </html>

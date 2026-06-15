@@ -1,6 +1,7 @@
 <?php
 session_start();
 require_once __DIR__ . "/includes/db.php";
+require_once __DIR__ . "/includes/pms-helper.php";
 date_default_timezone_set('Asia/Kolkata');
 
 function e($v)
@@ -506,6 +507,9 @@ if ($project) {
     $parts[] = trim($h['email'] ?: $h['full_name']);
   $defaultDistribute = implode(', ', array_values(array_unique(array_filter($parts))));
 }
+$pmsSchedule = $projectId > 0 ? pms_project_schedule($conn, $projectId) : null;
+[$pmsScheduleStart, $pmsScheduleEnd] = pms_schedule_date_range($pmsSchedule, $project);
+
 $defaultDivision = $project['project_division_name'] ?? ($divisions[0] ?? '');
 $defaultDarNo = '';
 if ($projectId > 0) {
@@ -675,6 +679,24 @@ if ($projectId > 0) {
     }
   }
 
+  /*
+   * Fallback: show/load previous project report even if the logged-in employee
+   * has not submitted DAR before. This keeps the checkbox visible for every user.
+   */
+  if (!$previousDarTemplate) {
+    $tplQ = mysqli_query($conn, "
+      SELECT id, dar_no, dar_date, division, incharge, activities_json, report_distribute_to
+      FROM dar_reports
+      WHERE project_id = $projectId
+      ORDER BY dar_date DESC, created_at DESC
+      LIMIT 1
+    ");
+
+    if ($tplQ) {
+      $previousDarTemplate = mysqli_fetch_assoc($tplQ);
+    }
+  }
+
   $recentTemplate = $previousDarTemplate;
 }
 
@@ -697,7 +719,7 @@ while ($rq && $r = mysqli_fetch_assoc($rq)) {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>DAR - TEK-C PMC Construction</title><?php include('includes/links.php'); ?>
+  <title>DAR - TEK-C PMS Construction</title><?php include('includes/links.php'); ?>
   <style>
     .page-head-card {
       background: var(--card-bg);
@@ -809,17 +831,19 @@ while ($rq && $r = mysqli_fetch_assoc($rq)) {
               <p class="text-muted-custom mb-0 small">Planned, achieved, planned for tomorrow and remarks.</p>
             </div>
             <div class="d-flex flex-wrap gap-2 align-items-center">
-              <?php if ($previousDarTemplate): ?>
-                <label class="badge-soft mb-0" title="Load previous submitted DAR data without changing DAR No or Date">
-                  <input type="checkbox" class="form-check-input mt-0" id="loadPreviousDarData">
-                  <span>
-                    <strong>Load previous data</strong>
-                    <small class="d-block text-muted-custom fw-semibold">
+              <label class="badge-soft mb-0 <?= !$previousDarTemplate ? 'opacity-75' : '' ?>" title="<?= $previousDarTemplate ? 'Load previous submitted DAR data without changing DAR No, Date or Project' : 'No previous DAR data found for this project' ?>">
+                <input type="checkbox" class="form-check-input mt-0" id="loadPreviousDarData" <?= !$previousDarTemplate ? 'disabled' : '' ?>>
+                <span>
+                  <strong>Load previous data</strong>
+                  <small class="d-block text-muted-custom fw-semibold">
+                    <?php if ($previousDarTemplate): ?>
                       <?= e($previousDarTemplate['dar_no']) ?> · <?= e(date('d M Y', strtotime($previousDarTemplate['dar_date']))) ?>
-                    </small>
-                  </span>
-                </label>
-              <?php endif; ?>
+                    <?php else: ?>
+                      No previous data
+                    <?php endif; ?>
+                  </small>
+                </span>
+              </label>
               <span class="badge-soft"><i data-lucide="user"
                   style="width:15px;height:15px;"></i><?= e($preparedBy) ?></span><a href="reports-hub.php"
                 class="btn btn-outline-secondary rounded-4 fw-bold btn-sm">Back to Reports Hub</a></div>
@@ -875,6 +899,18 @@ while ($rq && $r = mysqli_fetch_assoc($rq)) {
               </div>
               <div class="col-md-4"><small class="text-muted-custom fw-bold">Expected Completion</small>
                 <div class="fw-bold"><?= e($project['expected_completion_date'] ?? '-') ?></div>
+              </div>
+              <div class="col-md-4"><small class="text-muted-custom fw-bold">PMS Schedule</small>
+                <div class="fw-bold"><?= e($pmsSchedule['schedule_name'] ?? 'PMS Schedule') ?></div>
+              </div>
+              <div class="col-md-4"><small class="text-muted-custom fw-bold">PMS Schedule Start</small>
+                <div class="fw-bold"><?= e($pmsScheduleStart ?: ($project['start_date'] ?? '-')) ?></div>
+              </div>
+              <div class="col-md-4"><small class="text-muted-custom fw-bold">PMS Schedule End</small>
+                <div class="fw-bold"><?= e($pmsScheduleEnd ?: ($project['expected_completion_date'] ?? '-')) ?></div>
+              </div>
+              <div class="col-md-4"><small class="text-muted-custom fw-bold">PMS Status</small>
+                <div class="fw-bold"><?= e(ucwords(str_replace('_', ' ', $pmsSchedule['schedule_status'] ?? '-'))) ?></div>
               </div>
               <div class="col-12"><small class="text-muted-custom fw-bold">Scope of Work</small>
                 <div class="fw-bold"><?= e($project['scope_of_work'] ?? '-') ?></div>
@@ -989,7 +1025,7 @@ while ($rq && $r = mysqli_fetch_assoc($rq)) {
                             class="text-muted-custom fw-bold"><?= e($r['project_name']) ?></small>
                         </div><span class="pill green"><?= e(date('d M Y', strtotime($r['dar_date']))) ?></span>
                       </div><a class="btn btn-sm btn-outline-primary rounded-4 fw-bold mt-2" target="_blank"
-                        href="reports-print/report-dar-print.php?id=<?= (int) $r['id'] ?>">Print</a>
+                        href="reports-print/report-dar-print.php?view=<?= (int) $r['id'] ?>">Print</a>
                     </div>
                   </div><?php endforeach; ?>
               </div><?php endif; ?>
@@ -1005,7 +1041,7 @@ while ($rq && $r = mysqli_fetch_assoc($rq)) {
     const previousDarTemplate = <?php
     $tplRows = [];
     if ($previousDarTemplate && !empty($previousDarTemplate['activities_json'])) {
-      $decoded = json_decode($recentTemplate['activities_json'], true);
+      $decoded = json_decode($previousDarTemplate['activities_json'], true);
       if (is_array($decoded)) {
         $tplRows = $decoded;
       }

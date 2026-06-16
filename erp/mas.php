@@ -11,12 +11,12 @@ if (empty($_SESSION['user_id']) && empty($_SESSION['employee_id'])) {
     exit;
 }
 
-function pmsr_e($value): string
+function mas_e($value): string
 {
     return htmlspecialchars((string)($value ?? ''), ENT_QUOTES, 'UTF-8');
 }
 
-function pmsr_employee_id(mysqli $conn): int
+function mas_employee_id(mysqli $conn): int
 {
     if (!empty($_SESSION['employee_id'])) {
         return (int)$_SESSION['employee_id'];
@@ -43,7 +43,7 @@ function pmsr_employee_id(mysqli $conn): int
     return 0;
 }
 
-function pmsr_is_super_admin(mysqli $conn): bool
+function mas_is_super_admin(mysqli $conn): bool
 {
     $userId = (int)($_SESSION['user_id'] ?? 0);
 
@@ -67,9 +67,9 @@ function pmsr_is_super_admin(mysqli $conn): bool
     return $query && mysqli_num_rows($query) > 0;
 }
 
-function pmsr_report_access(mysqli $conn, string $permission): bool
+function mas_report_access(mysqli $conn, string $permission): bool
 {
-    if (pmsr_is_super_admin($conn)) {
+    if (mas_is_super_admin($conn)) {
         return true;
     }
 
@@ -98,7 +98,7 @@ function pmsr_report_access(mysqli $conn, string $permission): bool
         INNER JOIN master_report_types rt
             ON rt.id = rtra.report_type_id
         WHERE ur.user_id = $userId
-          AND rt.report_code = 'PMS'
+          AND rt.report_code = 'MAS'
           AND rt.is_active = 1
     ");
 
@@ -107,7 +107,7 @@ function pmsr_report_access(mysqli $conn, string $permission): bool
         && (int)($row['allowed'] ?? 0) === 1;
 }
 
-function pmsr_project_allowed(
+function mas_project_allowed(
     mysqli $conn,
     int $projectId,
     int $employeeId,
@@ -143,10 +143,11 @@ function pmsr_project_allowed(
     return $query && mysqli_num_rows($query) > 0;
 }
 
-function pmsr_columns(mysqli $conn, string $table): array
+function mas_table_columns(mysqli $conn, string $table): array
 {
     $table = preg_replace('/[^A-Za-z0-9_]/', '', $table);
     $columns = [];
+
     $query = mysqli_query($conn, "SHOW COLUMNS FROM `$table`");
 
     while ($query && ($row = mysqli_fetch_assoc($query))) {
@@ -156,7 +157,7 @@ function pmsr_columns(mysqli $conn, string $table): array
     return $columns;
 }
 
-function pmsr_sql_value(mysqli $conn, $value): string
+function mas_sql_value(mysqli $conn, $value): string
 {
     if ($value === null) {
         return 'NULL';
@@ -169,12 +170,12 @@ function pmsr_sql_value(mysqli $conn, $value): string
     return "'" . mysqli_real_escape_string($conn, (string)$value) . "'";
 }
 
-function pmsr_report_type_id(mysqli $conn): int
+function mas_report_type_id(mysqli $conn): int
 {
     $query = mysqli_query($conn, "
         SELECT id
         FROM master_report_types
-        WHERE report_code = 'PMS'
+        WHERE report_code = 'MAS'
         LIMIT 1
     ");
 
@@ -183,7 +184,7 @@ function pmsr_report_type_id(mysqli $conn): int
         : 0;
 }
 
-function pmsr_find_existing(
+function mas_find_existing(
     mysqli $conn,
     int $submissionId,
     int $projectId,
@@ -191,7 +192,7 @@ function pmsr_find_existing(
     string $reportDate
 ): int {
     if ($submissionId > 0) {
-        $columns = pmsr_columns($conn, 'project_report_submissions');
+        $columns = mas_table_columns($conn, 'project_report_submissions');
         $select = ['id'];
 
         foreach (['report_reference_id', 'source_id', 'reference_id'] as $column) {
@@ -218,7 +219,7 @@ function pmsr_find_existing(
 
                 $check = mysqli_query(
                     $conn,
-                    "SELECT id FROM pms_main WHERE id = $candidateId LIMIT 1"
+                    "SELECT id FROM mas_main WHERE id = $candidateId LIMIT 1"
                 );
 
                 if ($check && mysqli_num_rows($check) > 0) {
@@ -232,10 +233,10 @@ function pmsr_find_existing(
 
     $query = mysqli_query($conn, "
         SELECT id
-        FROM pms_main
+        FROM mas_main
         WHERE project_id = $projectId
-          AND prepared_by = $employeeId
-          AND pms_date = '$dateEsc'
+          AND created_by = $employeeId
+          AND meeting_date = '$dateEsc'
         ORDER BY id DESC
         LIMIT 1
     ");
@@ -245,22 +246,23 @@ function pmsr_find_existing(
         : 0;
 }
 
-function pmsr_sync_submission(
+function mas_sync_submission(
     mysqli $conn,
     int $submissionId,
     int $projectId,
     int $employeeId,
     string $reportDate,
-    int $pmsId,
-    string $pmsNo
+    int $masId,
+    string $masNo,
+    string $meetingTitle
 ): void {
-    $reportTypeId = pmsr_report_type_id($conn);
+    $reportTypeId = mas_report_type_id($conn);
 
-    if ($reportTypeId <= 0 || $pmsId <= 0) {
+    if ($reportTypeId <= 0 || $masId <= 0) {
         return;
     }
 
-    $columns = pmsr_columns($conn, 'project_report_submissions');
+    $columns = mas_table_columns($conn, 'project_report_submissions');
     $userId = (int)($_SESSION['user_id'] ?? 0);
     $dateEsc = mysqli_real_escape_string($conn, $reportDate);
 
@@ -272,10 +274,10 @@ function pmsr_sync_submission(
               AND report_type_id = $reportTypeId
               AND submission_for_date = '$dateEsc'
               AND (
-                    report_reference_id = $pmsId
-                 OR source_id = $pmsId
-                 OR reference_id = $pmsId
-                 OR report_no = '" . mysqli_real_escape_string($conn, $pmsNo) . "'
+                    report_reference_id = $masId
+                 OR source_id = $masId
+                 OR reference_id = $masId
+                 OR report_no = '" . mysqli_real_escape_string($conn, $masNo) . "'
               )
             ORDER BY id DESC
             LIMIT 1
@@ -287,10 +289,10 @@ function pmsr_sync_submission(
     }
 
     $map = [
-        'report_no' => $pmsNo,
-        'report_number' => $pmsNo,
-        'submission_no' => $pmsNo,
-        'title' => 'Project Master Schedule',
+        'report_no' => $masNo,
+        'report_number' => $masNo,
+        'submission_no' => $masNo,
+        'title' => $meetingTitle !== '' ? $meetingTitle : 'Meeting Attendance Sheet',
         'submitted_by_employee_id' => $employeeId,
         'submitted_by_user_id' => $userId > 0 ? $userId : null,
         'submission_for_date' => $reportDate,
@@ -298,11 +300,11 @@ function pmsr_sync_submission(
         'period_end' => $reportDate,
         'status' => 'submitted',
         'submitted_at' => date('Y-m-d H:i:s'),
-        'source_table' => 'pms_main',
-        'source_id' => $pmsId,
-        'report_reference_table' => 'pms_main',
-        'report_reference_id' => $pmsId,
-        'reference_id' => $pmsId,
+        'source_table' => 'mas_main',
+        'source_id' => $masId,
+        'report_reference_table' => 'mas_main',
+        'report_reference_id' => $masId,
+        'reference_id' => $masId,
         'updated_by' => $userId > 0 ? $userId : null,
         'updated_at' => date('Y-m-d H:i:s'),
     ];
@@ -312,7 +314,7 @@ function pmsr_sync_submission(
 
         foreach ($map as $field => $value) {
             if (isset($columns[$field])) {
-                $sets[] = "`$field` = " . pmsr_sql_value($conn, $value);
+                $sets[] = "`$field` = " . mas_sql_value($conn, $value);
             }
         }
 
@@ -328,7 +330,7 @@ function pmsr_sync_submission(
         return;
     }
 
-    $data = array_merge([
+    $insertData = array_merge([
         'project_id' => $projectId,
         'report_type_id' => $reportTypeId,
         'created_by' => $userId > 0 ? $userId : null,
@@ -338,10 +340,10 @@ function pmsr_sync_submission(
     $insertColumns = [];
     $insertValues = [];
 
-    foreach ($data as $field => $value) {
+    foreach ($insertData as $field => $value) {
         if (isset($columns[$field])) {
             $insertColumns[] = "`$field`";
-            $insertValues[] = pmsr_sql_value($conn, $value);
+            $insertValues[] = mas_sql_value($conn, $value);
         }
     }
 
@@ -356,7 +358,7 @@ function pmsr_sync_submission(
     }
 }
 
-function pmsr_redirect_hub(
+function mas_redirect_hub(
     int $projectId,
     string $reportDate,
     string $flag
@@ -375,18 +377,18 @@ function pmsr_redirect_hub(
     exit;
 }
 
-$employeeId = pmsr_employee_id($conn);
-$isSuperAdmin = pmsr_is_super_admin($conn);
+$employeeId = mas_employee_id($conn);
+$isSuperAdmin = mas_is_super_admin($conn);
 
 if ($employeeId <= 0) {
     header('Location: login.php');
     exit;
 }
 
-if (!pmsr_report_access($conn, 'can_submit')) {
+if (!mas_report_access($conn, 'can_submit')) {
     header(
         'Location: reports-hub.php?error='
-        . urlencode('You do not have PMS submit access.')
+        . urlencode('You do not have MAS submit access.')
     );
     exit;
 }
@@ -426,7 +428,7 @@ $projectId = (int)(
 
 $reportDate = trim((string)(
     $_GET['report_date']
-    ?? $_POST['pms_date']
+    ?? $_POST['meeting_date']
     ?? date('Y-m-d')
 ));
 
@@ -488,7 +490,7 @@ $project = null;
 
 if (
     $projectId > 0
-    && pmsr_project_allowed(
+    && mas_project_allowed(
         $conn,
         $projectId,
         $employeeId,
@@ -515,38 +517,38 @@ if (
     }
 }
 
-$currentSchedule = $projectId > 0
+$pmsSchedule = $projectId > 0
     ? pms_project_schedule($conn, $projectId)
     : null;
 
-[$scheduleStart, $scheduleEnd] =
-    pms_schedule_date_range($currentSchedule, $project);
+[$pmsStart, $pmsEnd] =
+    pms_schedule_date_range($pmsSchedule, $project);
 
-$defaultNo = '';
+$defaultMasNo = '';
 
 if ($projectId > 0) {
-    $prefix = 'PMS/' . $projectId . '/' . date('Ym', strtotime($reportDate)) . '/';
+    $prefix = 'MAS/' . $projectId . '/' . date('Ym', strtotime($reportDate)) . '/';
     $prefixEsc = mysqli_real_escape_string($conn, $prefix);
 
-    $query = mysqli_query(
+    $countQuery = mysqli_query(
         $conn,
         "SELECT COUNT(*) AS total
-         FROM pms_main
-         WHERE pms_no LIKE '$prefixEsc%'"
+         FROM mas_main
+         WHERE mas_no LIKE '$prefixEsc%'"
     );
 
-    $count = $query
-        ? (int)(mysqli_fetch_assoc($query)['total'] ?? 0)
+    $count = $countQuery
+        ? (int)(mysqli_fetch_assoc($countQuery)['total'] ?? 0)
         : 0;
 
-    $defaultNo = $prefix
+    $defaultMasNo = $prefix
         . str_pad((string)($count + 1), 3, '0', STR_PAD_LEFT);
 }
 
 $existingReport = null;
 
 if ($resubmitSubmissionId > 0 && $projectId > 0) {
-    $existingId = pmsr_find_existing(
+    $existingId = mas_find_existing(
         $conn,
         $resubmitSubmissionId,
         $projectId,
@@ -557,7 +559,7 @@ if ($resubmitSubmissionId > 0 && $projectId > 0) {
     if ($existingId > 0) {
         $query = mysqli_query(
             $conn,
-            "SELECT * FROM pms_main WHERE id = $existingId LIMIT 1"
+            "SELECT * FROM mas_main WHERE id = $existingId LIMIT 1"
         );
 
         if ($query) {
@@ -572,15 +574,15 @@ if ($projectId > 0) {
     $dateEsc = mysqli_real_escape_string($conn, $reportDate);
 
     foreach ([
-        "project_id = $projectId AND prepared_by = $employeeId AND pms_date < '$dateEsc'",
-        "project_id = $projectId AND prepared_by = $employeeId",
+        "project_id = $projectId AND created_by = $employeeId AND meeting_date < '$dateEsc'",
+        "project_id = $projectId AND created_by = $employeeId",
         "project_id = $projectId"
     ] as $where) {
         $query = mysqli_query($conn, "
             SELECT *
-            FROM pms_main
+            FROM mas_main
             WHERE $where
-            ORDER BY pms_date DESC, created_at DESC, id DESC
+            ORDER BY meeting_date DESC, created_at DESC, id DESC
             LIMIT 1
         ");
 
@@ -590,15 +592,18 @@ if ($projectId > 0) {
     }
 }
 
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_pms'])) {
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_mas'])) {
     $postProjectId = (int)($_POST['project_id'] ?? 0);
     $postSubmissionId = (int)($_POST['resubmit_submission_id'] ?? 0);
 
-    $pmsNo = trim((string)($_POST['pms_no'] ?? ''));
-    $pmsDate = trim((string)($_POST['pms_date'] ?? ''));
+    $masNo = trim((string)($_POST['mas_no'] ?? ''));
+    $meetingTitle = trim((string)($_POST['meeting_title'] ?? ''));
+    $meetingDate = trim((string)($_POST['meeting_date'] ?? ''));
+    $meetingTime = trim((string)($_POST['meeting_time'] ?? ''));
+    $meetingVenue = trim((string)($_POST['meeting_venue'] ?? ''));
+    $conductedBy = trim((string)($_POST['conducted_by'] ?? ''));
     $architect = trim((string)($_POST['architect'] ?? ''));
     $pmc = trim((string)($_POST['pmc'] ?? ''));
-    $version = trim((string)($_POST['version'] ?? 'R0'));
     $remarks = trim((string)($_POST['remarks'] ?? ''));
 
     $items = json_decode(
@@ -609,7 +614,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_pms'])) {
     $error = '';
 
     if (
-        !pmsr_project_allowed(
+        !mas_project_allowed(
             $conn,
             $postProjectId,
             $employeeId,
@@ -617,22 +622,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_pms'])) {
         )
     ) {
         $error = 'Invalid project selection.';
-    } elseif ($pmsNo === '') {
-        $error = 'PMS No is required.';
-    } elseif (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $pmsDate)) {
-        $error = 'Valid PMS date is required.';
+    } elseif ($masNo === '') {
+        $error = 'MAS No is required.';
+    } elseif ($meetingTitle === '') {
+        $error = 'Meeting title is required.';
+    } elseif (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $meetingDate)) {
+        $error = 'Valid meeting date is required.';
     } elseif (!is_array($items)) {
-        $error = 'Invalid schedule rows.';
+        $error = 'Invalid attendee rows.';
     }
 
     $items = array_values(array_filter(
         is_array($items) ? $items : [],
         static fn($row) =>
-            trim((string)($row['task_activity'] ?? '')) !== ''
+            trim((string)($row['attendee_name'] ?? '')) !== ''
     ));
 
     if ($error === '' && !$items) {
-        $error = 'Please enter at least one task or milestone.';
+        $error = 'Please enter at least one attendee.';
     }
 
     if ($error === '') {
@@ -659,24 +666,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_pms'])) {
 
         try {
             if ($postSubmissionId > 0) {
-                $pmsId = pmsr_find_existing(
+                $masId = mas_find_existing(
                     $conn,
                     $postSubmissionId,
                     $postProjectId,
                     $employeeId,
-                    $pmsDate
+                    $meetingDate
                 );
 
-                if ($pmsId <= 0) {
+                if ($masId <= 0) {
                     throw new RuntimeException(
-                        'Original PMS not found for resubmission.'
+                        'Original MAS not found for resubmission.'
                     );
                 }
 
                 $stmt = mysqli_prepare($conn, "
-                    UPDATE pms_main
+                    UPDATE mas_main
                     SET
-                        pms_no = ?,
+                        mas_no = ?,
                         project_id = ?,
                         site_id = ?,
                         client_id = ?,
@@ -684,9 +691,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_pms'])) {
                         client_name = ?,
                         architect = ?,
                         pmc = ?,
-                        version = ?,
-                        pms_date = ?,
-                        prepared_by_name = ?,
+                        meeting_title = ?,
+                        meeting_date = ?,
+                        meeting_time = NULLIF(?, ''),
+                        meeting_venue = ?,
+                        conducted_by = ?,
+                        created_by_name = ?,
                         remarks = ?,
                         updated_at = NOW()
                     WHERE id = ?
@@ -698,8 +708,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_pms'])) {
 
                 mysqli_stmt_bind_param(
                     $stmt,
-                    'siiissssssssi',
-                    $pmsNo,
+                    'siiisssssssssssi',
+                    $masNo,
                     $postProjectId,
                     $postProjectId,
                     $clientId,
@@ -707,11 +717,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_pms'])) {
                     $clientName,
                     $architect,
                     $pmc,
-                    $version,
-                    $pmsDate,
+                    $meetingTitle,
+                    $meetingDate,
+                    $meetingTime,
+                    $meetingVenue,
+                    $conductedBy,
                     $employeeName,
                     $remarks,
-                    $pmsId
+                    $masId
                 );
 
                 if (!mysqli_stmt_execute($stmt)) {
@@ -722,13 +735,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_pms'])) {
 
                 mysqli_query(
                     $conn,
-                    "DELETE FROM pms_details WHERE pms_main_id = $pmsId"
+                    "DELETE FROM mas_details WHERE mas_main_id = $masId"
                 );
             } else {
                 $stmt = mysqli_prepare($conn, "
-                    INSERT INTO pms_main
+                    INSERT INTO mas_main
                     (
-                        pms_no,
+                        mas_no,
                         project_id,
                         site_id,
                         client_id,
@@ -736,13 +749,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_pms'])) {
                         client_name,
                         architect,
                         pmc,
-                        version,
-                        pms_date,
-                        prepared_by,
-                        prepared_by_name,
+                        meeting_title,
+                        meeting_date,
+                        meeting_time,
+                        meeting_venue,
+                        conducted_by,
+                        created_by,
+                        created_by_name,
                         remarks
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES
+                    (
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                        NULLIF(?, ''), ?, ?, ?, ?, ?
+                    )
                 ");
 
                 if (!$stmt) {
@@ -751,8 +771,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_pms'])) {
 
                 mysqli_stmt_bind_param(
                     $stmt,
-                    'siiissssssiss',
-                    $pmsNo,
+                    'siiisssssssssiss',
+                    $masNo,
                     $postProjectId,
                     $postProjectId,
                     $clientId,
@@ -760,8 +780,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_pms'])) {
                     $clientName,
                     $architect,
                     $pmc,
-                    $version,
-                    $pmsDate,
+                    $meetingTitle,
+                    $meetingDate,
+                    $meetingTime,
+                    $meetingVenue,
+                    $conductedBy,
                     $employeeId,
                     $employeeName,
                     $remarks
@@ -771,22 +794,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_pms'])) {
                     throw new RuntimeException(mysqli_stmt_error($stmt));
                 }
 
-                $pmsId = (int)mysqli_insert_id($conn);
+                $masId = (int)mysqli_insert_id($conn);
                 mysqli_stmt_close($stmt);
             }
 
             $detailStmt = mysqli_prepare($conn, "
-                INSERT INTO pms_details
+                INSERT INTO mas_details
                 (
-                    pms_main_id,
+                    mas_main_id,
                     sl_no,
-                    task_activity,
-                    duration_days,
-                    date_start,
-                    date_end,
-                    remark
+                    attendee_name,
+                    organization,
+                    mobile_no,
+                    email_id,
+                    signature
                 )
-                VALUES (?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
             ");
 
             if (!$detailStmt) {
@@ -795,35 +818,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_pms'])) {
 
             foreach ($items as $index => $item) {
                 $slNo = $index + 1;
-                $task = trim((string)($item['task_activity'] ?? ''));
-                $duration = max(0, (int)($item['duration_days'] ?? 0));
-                $startDate = trim((string)($item['date_start'] ?? ''));
-                $endDate = trim((string)($item['date_end'] ?? ''));
-                $remark = trim((string)($item['remark'] ?? ''));
-
-                if (
-                    $endDate === ''
-                    && $startDate !== ''
-                    && $duration > 0
-                ) {
-                    $endDate = date(
-                        'Y-m-d',
-                        strtotime(
-                            $startDate . ' +' . max(0, $duration - 1) . ' days'
-                        )
-                    );
-                }
+                $attendeeName = trim((string)($item['attendee_name'] ?? ''));
+                $organization = trim((string)($item['organization'] ?? ''));
+                $mobileNo = trim((string)($item['mobile_no'] ?? ''));
+                $emailId = trim((string)($item['email_id'] ?? ''));
+                $signature = trim((string)($item['signature'] ?? ''));
 
                 mysqli_stmt_bind_param(
                     $detailStmt,
-                    'iisisss',
-                    $pmsId,
+                    'iisssss',
+                    $masId,
                     $slNo,
-                    $task,
-                    $duration,
-                    $startDate,
-                    $endDate,
-                    $remark
+                    $attendeeName,
+                    $organization,
+                    $mobileNo,
+                    $emailId,
+                    $signature
                 );
 
                 if (!mysqli_stmt_execute($detailStmt)) {
@@ -835,21 +845,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_pms'])) {
 
             mysqli_stmt_close($detailStmt);
 
-            pmsr_sync_submission(
+            mas_sync_submission(
                 $conn,
                 $postSubmissionId,
                 $postProjectId,
                 $employeeId,
-                $pmsDate,
-                $pmsId,
-                $pmsNo
+                $meetingDate,
+                $masId,
+                $masNo,
+                $meetingTitle
             );
 
             mysqli_commit($conn);
 
-            pmsr_redirect_hub(
+            mas_redirect_hub(
                 $postProjectId,
-                $pmsDate,
+                $meetingDate,
                 $postSubmissionId > 0
                     ? 'resubmitted'
                     : 'saved'
@@ -862,9 +873,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_pms'])) {
 
     if ($error !== '') {
         header(
-            'Location: pms.php'
+            'Location: mas.php'
             . '?project_id=' . $postProjectId
-            . '&report_date=' . urlencode($pmsDate)
+            . '&report_date=' . urlencode($meetingDate)
             . '&error=' . urlencode($error)
         );
         exit;
@@ -872,11 +883,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_pms'])) {
 }
 
 $formData = [
-    'pms_no' => $existingReport['pms_no'] ?? $defaultNo,
-    'pms_date' => $existingReport['pms_date'] ?? $reportDate,
+    'mas_no' => $existingReport['mas_no'] ?? $defaultMasNo,
+    'meeting_title' => $existingReport['meeting_title'] ?? '',
+    'meeting_date' => $existingReport['meeting_date'] ?? $reportDate,
+    'meeting_time' => $existingReport['meeting_time'] ?? '',
+    'meeting_venue' => $existingReport['meeting_venue'] ?? '',
+    'conducted_by' => $existingReport['conducted_by'] ?? '',
     'architect' => $existingReport['architect'] ?? '',
     'pmc' => $existingReport['pmc'] ?? '',
-    'version' => $existingReport['version'] ?? 'R0',
     'remarks' => $existingReport['remarks'] ?? '',
     'items' => [],
 ];
@@ -885,8 +899,8 @@ if ($existingReport) {
     $query = mysqli_query(
         $conn,
         "SELECT *
-         FROM pms_details
-         WHERE pms_main_id = " . (int)$existingReport['id'] . "
+         FROM mas_details
+         WHERE mas_main_id = " . (int)$existingReport['id'] . "
          ORDER BY sl_no, id"
     );
 
@@ -897,11 +911,11 @@ if ($existingReport) {
 
 if (!$formData['items']) {
     $formData['items'] = array_fill(0, 3, [
-        'task_activity' => '',
-        'duration_days' => 0,
-        'date_start' => '',
-        'date_end' => '',
-        'remark' => '',
+        'attendee_name' => '',
+        'organization' => '',
+        'mobile_no' => '',
+        'email_id' => '',
+        'signature' => '',
     ]);
 }
 
@@ -913,8 +927,8 @@ if ($previousReport) {
     $query = mysqli_query(
         $conn,
         "SELECT *
-         FROM pms_details
-         WHERE pms_main_id = " . (int)$previousReport['id'] . "
+         FROM mas_details
+         WHERE mas_main_id = " . (int)$previousReport['id'] . "
          ORDER BY sl_no, id"
     );
 
@@ -923,11 +937,14 @@ if ($previousReport) {
     }
 
     $previousPayload = [
-        'pms_no' => $previousReport['pms_no'] ?? '',
-        'pms_date' => $previousReport['pms_date'] ?? '',
+        'mas_no' => $previousReport['mas_no'] ?? '',
+        'meeting_date' => $previousReport['meeting_date'] ?? '',
+        'meeting_title' => $previousReport['meeting_title'] ?? '',
+        'meeting_time' => $previousReport['meeting_time'] ?? '',
+        'meeting_venue' => $previousReport['meeting_venue'] ?? '',
+        'conducted_by' => $previousReport['conducted_by'] ?? '',
         'architect' => $previousReport['architect'] ?? '',
         'pmc' => $previousReport['pmc'] ?? '',
-        'version' => $previousReport['version'] ?? 'R0',
         'remarks' => $previousReport['remarks'] ?? '',
         'items' => $items,
     ];
@@ -938,13 +955,14 @@ $recent = [];
 $query = mysqli_query($conn, "
     SELECT
         m.id,
-        m.pms_no,
-        m.pms_date,
+        m.mas_no,
+        m.meeting_date,
+        m.meeting_title,
         m.project_name,
-        COUNT(d.id) AS task_count
-    FROM pms_main m
-    LEFT JOIN pms_details d ON d.pms_main_id = m.id
-    WHERE m.prepared_by = $employeeId
+        COUNT(d.id) AS attendee_count
+    FROM mas_main m
+    LEFT JOIN mas_details d ON d.mas_main_id = m.id
+    WHERE m.created_by = $employeeId
     GROUP BY m.id
     ORDER BY m.created_at DESC
     LIMIT 10
@@ -964,7 +982,7 @@ $pageMessageText = isset($_GET['error'])
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>PMS - TEK-C PMC Construction</title>
+    <title>MAS - TEK-C PMC Construction</title>
 
     <?php include 'includes/links.php'; ?>
 
@@ -1010,11 +1028,11 @@ $pageMessageText = isset($_GET['error'])
             font-weight: 700;
         }
 
-        .pms-table {
-            min-width: 1250px;
+        .mas-table {
+            min-width: 1300px;
         }
 
-        .pms-table th {
+        .mas-table th {
             font-size: 11px;
             text-transform: uppercase;
             color: var(--text-muted);
@@ -1063,12 +1081,12 @@ $pageMessageText = isset($_GET['error'])
                     <div>
                         <h1 class="h4 fw-bold mb-1">
                             <?= $resubmitSubmissionId > 0
-                                ? 'Resubmit Project Master Schedule (PMS)'
-                                : 'Project Master Schedule (PMS)' ?>
+                                ? 'Resubmit Meeting Attendance Sheet (MAS)'
+                                : 'Meeting Attendance Sheet (MAS)' ?>
                         </h1>
 
                         <p class="text-muted-custom mb-0 small">
-                            Plan project activities, milestones and timelines.
+                            Record project meeting attendees and contact information.
                         </p>
                     </div>
 
@@ -1082,11 +1100,11 @@ $pageMessageText = isset($_GET['error'])
                                 <strong>Load previous data</strong>
                                 <small class="d-block text-muted-custom">
                                     <?= $previousPayload
-                                        ? pmsr_e($previousPayload['pms_no'])
+                                        ? mas_e($previousPayload['mas_no'])
                                             . ' · '
-                                            . pmsr_e(date(
+                                            . mas_e(date(
                                                 'd M Y',
-                                                strtotime($previousPayload['pms_date'])
+                                                strtotime($previousPayload['meeting_date'])
                                             ))
                                         : 'No previous data' ?>
                                 </small>
@@ -1095,11 +1113,11 @@ $pageMessageText = isset($_GET['error'])
 
                         <span class="badge-soft">
                             <i data-lucide="user" style="width:15px"></i>
-                            <?= pmsr_e($employeeName) ?>
+                            <?= mas_e($employeeName) ?>
                         </span>
 
                         <span class="badge-soft">
-                            <?= pmsr_e($designationName) ?>
+                            <?= mas_e($designationName) ?>
                         </span>
 
                         <a href="reports-hub.php"
@@ -1139,18 +1157,18 @@ $pageMessageText = isset($_GET['error'])
                                     <?= (int)$projectOption['id'] === $projectId
                                         ? 'selected'
                                         : '' ?>>
-                                    <?= pmsr_e($projectOption['project_name']) ?>
+                                    <?= mas_e($projectOption['project_name']) ?>
                                     <?= !empty($projectOption['project_code'])
-                                        ? ' (' . pmsr_e($projectOption['project_code']) . ')'
+                                        ? ' (' . mas_e($projectOption['project_code']) . ')'
                                         : '' ?>
-                                    - <?= pmsr_e($projectOption['project_location'] ?: '-') ?>
+                                    - <?= mas_e($projectOption['project_location'] ?: '-') ?>
                                 </option>
                             <?php endforeach; ?>
                         </select>
                     </div>
 
                     <div class="col-lg-3">
-                        <a href="pms.php"
+                        <a href="mas.php"
                            class="btn btn-outline-secondary rounded-4 fw-bold w-100">
                             Reset
                         </a>
@@ -1167,7 +1185,7 @@ $pageMessageText = isset($_GET['error'])
                     <div>
                         <h2 class="fw-bold fs-6 mb-1">Project Details</h2>
                         <p class="text-muted-custom small mb-0">
-                            Current project and preferred PMS schedule.
+                            Auto-filled from the current project.
                         </p>
                     </div>
                 </div>
@@ -1180,41 +1198,41 @@ $pageMessageText = isset($_GET['error'])
                     <div class="row g-3">
                         <div class="col-md-4">
                             <small class="text-muted-custom fw-bold">Project</small>
-                            <div class="fw-bold"><?= pmsr_e($project['project_name']) ?></div>
+                            <div class="fw-bold"><?= mas_e($project['project_name']) ?></div>
                         </div>
 
                         <div class="col-md-4">
                             <small class="text-muted-custom fw-bold">Client</small>
-                            <div class="fw-bold"><?= pmsr_e($project['client_name'] ?: '-') ?></div>
+                            <div class="fw-bold"><?= mas_e($project['client_name'] ?: '-') ?></div>
                         </div>
 
                         <div class="col-md-4">
                             <small class="text-muted-custom fw-bold">Location</small>
-                            <div class="fw-bold"><?= pmsr_e($project['project_location'] ?: '-') ?></div>
+                            <div class="fw-bold"><?= mas_e($project['project_location'] ?: '-') ?></div>
                         </div>
 
                         <div class="col-md-4">
                             <small class="text-muted-custom fw-bold">PMS Schedule</small>
                             <div class="fw-bold">
-                                <?= pmsr_e($currentSchedule['schedule_name'] ?? 'PMS Schedule') ?>
+                                <?= mas_e($pmsSchedule['schedule_name'] ?? 'PMS Schedule') ?>
                             </div>
                         </div>
 
                         <div class="col-md-4">
                             <small class="text-muted-custom fw-bold">PMS Start</small>
-                            <div class="fw-bold"><?= pmsr_e($scheduleStart ?: '-') ?></div>
+                            <div class="fw-bold"><?= mas_e($pmsStart ?: '-') ?></div>
                         </div>
 
                         <div class="col-md-4">
                             <small class="text-muted-custom fw-bold">PMS End</small>
-                            <div class="fw-bold"><?= pmsr_e($scheduleEnd ?: '-') ?></div>
+                            <div class="fw-bold"><?= mas_e($pmsEnd ?: '-') ?></div>
                         </div>
                     </div>
                 <?php endif; ?>
             </div>
 
-            <form method="POST" id="pmsForm">
-                <input type="hidden" name="submit_pms" value="1">
+            <form method="POST" id="masForm">
+                <input type="hidden" name="submit_mas" value="1">
                 <input type="hidden" name="project_id" value="<?= (int)$projectId ?>">
                 <input type="hidden"
                        name="resubmit_submission_id"
@@ -1228,39 +1246,39 @@ $pageMessageText = isset($_GET['error'])
                         </div>
 
                         <div>
-                            <h2 class="fw-bold fs-6 mb-1">PMS Header</h2>
+                            <h2 class="fw-bold fs-6 mb-1">MAS Header</h2>
                             <p class="text-muted-custom small mb-0">
-                                Report number, version and project-party details.
+                                Meeting and project-party details.
                             </p>
                         </div>
                     </div>
 
                     <div class="row g-3">
                         <div class="col-md-4">
-                            <label class="form-label fw-bold small">PMS No</label>
+                            <label class="form-label fw-bold small">MAS No</label>
                             <input class="form-control rounded-4"
-                                   name="pms_no"
-                                   value="<?= pmsr_e($formData['pms_no']) ?>"
+                                   name="mas_no"
+                                   value="<?= mas_e($formData['mas_no']) ?>"
                                    required>
                         </div>
 
                         <div class="col-md-4">
-                            <label class="form-label fw-bold small">PMS Date</label>
+                            <label class="form-label fw-bold small">Meeting Date</label>
                             <input type="date"
                                    class="form-control rounded-4"
-                                   id="pms_date"
-                                   name="pms_date"
-                                   value="<?= pmsr_e($formData['pms_date']) ?>"
+                                   id="meeting_date"
+                                   name="meeting_date"
+                                   value="<?= mas_e($formData['meeting_date']) ?>"
                                    required>
                         </div>
 
                         <div class="col-md-4">
-                            <label class="form-label fw-bold small">Version</label>
-                            <input class="form-control rounded-4"
-                                   id="version"
-                                   name="version"
-                                   placeholder="e.g. R0, R1, Final"
-                                   value="<?= pmsr_e($formData['version']) ?>">
+                            <label class="form-label fw-bold small">Meeting Time</label>
+                            <input type="time"
+                                   class="form-control rounded-4"
+                                   id="meeting_time"
+                                   name="meeting_time"
+                                   value="<?= mas_e($formData['meeting_time']) ?>">
                         </div>
 
                         <div class="col-md-6">
@@ -1269,7 +1287,7 @@ $pageMessageText = isset($_GET['error'])
                                    id="architect"
                                    name="architect"
                                    placeholder="Enter architect name"
-                                   value="<?= pmsr_e($formData['architect']) ?>">
+                                   value="<?= mas_e($formData['architect']) ?>">
                         </div>
 
                         <div class="col-md-6">
@@ -1278,7 +1296,35 @@ $pageMessageText = isset($_GET['error'])
                                    id="pmc"
                                    name="pmc"
                                    placeholder="Enter PMC name"
-                                   value="<?= pmsr_e($formData['pmc']) ?>">
+                                   value="<?= mas_e($formData['pmc']) ?>">
+                        </div>
+
+                        <div class="col-md-6">
+                            <label class="form-label fw-bold small">Meeting Title</label>
+                            <input class="form-control rounded-4"
+                                   id="meeting_title"
+                                   name="meeting_title"
+                                   placeholder="e.g. Weekly Review Meeting"
+                                   value="<?= mas_e($formData['meeting_title']) ?>"
+                                   required>
+                        </div>
+
+                        <div class="col-md-6">
+                            <label class="form-label fw-bold small">Venue</label>
+                            <input class="form-control rounded-4"
+                                   id="meeting_venue"
+                                   name="meeting_venue"
+                                   placeholder="Conference room / site office / online"
+                                   value="<?= mas_e($formData['meeting_venue']) ?>">
+                        </div>
+
+                        <div class="col-12">
+                            <label class="form-label fw-bold small">Conducted By</label>
+                            <input class="form-control rounded-4"
+                                   id="conducted_by"
+                                   name="conducted_by"
+                                   placeholder="Name of person conducting the meeting"
+                                   value="<?= mas_e($formData['conducted_by']) ?>">
                         </div>
                     </div>
                 </div>
@@ -1287,16 +1333,16 @@ $pageMessageText = isset($_GET['error'])
                     <div class="d-flex justify-content-between align-items-center mb-3">
                         <div class="mini-head mb-0">
                             <div class="mini-icon">
-                                <i data-lucide="calendar-range"></i>
+                                <i data-lucide="users"></i>
                             </div>
 
                             <div>
                                 <h2 class="fw-bold fs-6 mb-1">
-                                    Schedule Activities
+                                    Meeting Attendees
                                 </h2>
 
                                 <p class="text-muted-custom small mb-0">
-                                    Add project tasks, durations, dates and remarks.
+                                    Add all attendee contact and signature details.
                                 </p>
                             </div>
                         </div>
@@ -1304,25 +1350,25 @@ $pageMessageText = isset($_GET['error'])
                         <button type="button"
                                 id="addRow"
                                 class="btn btn-outline-primary rounded-4 fw-bold">
-                            Add Task
+                            Add Attendee
                         </button>
                     </div>
 
                     <div class="table-responsive thin-scrollbar">
-                        <table class="table table-bordered pms-table">
+                        <table class="table table-bordered mas-table">
                             <thead>
                             <tr>
                                 <th>SL</th>
-                                <th>Task / Activity / Milestone</th>
-                                <th>Duration Days</th>
-                                <th>Start Date</th>
-                                <th>End Date</th>
-                                <th>Remark</th>
+                                <th>Attendee Name</th>
+                                <th>Organization</th>
+                                <th>Mobile No</th>
+                                <th>Email ID</th>
+                                <th>Signature / Initials</th>
                                 <th>Del</th>
                             </tr>
                             </thead>
 
-                            <tbody id="pmsBody"></tbody>
+                            <tbody id="masBody"></tbody>
                         </table>
                     </div>
 
@@ -1335,7 +1381,7 @@ $pageMessageText = isset($_GET['error'])
                                   id="remarks"
                                   name="remarks"
                                   rows="3"
-                                  placeholder="Enter overall schedule remarks"><?= pmsr_e($formData['remarks']) ?></textarea>
+                                  placeholder="Enter meeting attendance remarks"><?= mas_e($formData['remarks']) ?></textarea>
                     </div>
                 </div>
 
@@ -1345,8 +1391,8 @@ $pageMessageText = isset($_GET['error'])
                                 class="btn brand-gradient text-white rounded-4 fw-bold px-4"
                                 <?= !$project ? 'disabled' : '' ?>>
                             <?= $resubmitSubmissionId > 0
-                                ? 'Resubmit PMS'
-                                : 'Submit PMS' ?>
+                                ? 'Resubmit MAS'
+                                : 'Submit MAS' ?>
                         </button>
                     </div>
                 </div>
@@ -1354,9 +1400,9 @@ $pageMessageText = isset($_GET['error'])
 
             <section class="card-ui overflow-hidden">
                 <div class="p-3 p-lg-4">
-                    <h2 class="fw-bold fs-6 mb-1">Recent PMS</h2>
+                    <h2 class="fw-bold fs-6 mb-1">Recent MAS</h2>
                     <p class="text-muted-custom small mb-0">
-                        Your latest Project Master Schedule submissions.
+                        Your latest Meeting Attendance Sheet submissions.
                     </p>
                 </div>
 
@@ -1366,25 +1412,27 @@ $pageMessageText = isset($_GET['error'])
                             <div class="col-md-6 col-xl-4">
                                 <div class="recent-card">
                                     <div class="fw-bold">
-                                        <?= pmsr_e($recentRow['pms_no']) ?>
+                                        <?= mas_e($recentRow['mas_no']) ?>
                                     </div>
 
                                     <small class="text-muted-custom">
-                                        <?= pmsr_e($recentRow['project_name']) ?>
+                                        <?= mas_e($recentRow['project_name']) ?>
                                         ·
-                                        <?= pmsr_e(date(
+                                        <?= mas_e(date(
                                             'd M Y',
-                                            strtotime($recentRow['pms_date'])
+                                            strtotime($recentRow['meeting_date'])
                                         )) ?>
                                         ·
-                                        <?= (int)$recentRow['task_count'] ?> task(s)
+                                        <?= (int)$recentRow['attendee_count'] ?> attendee(s)
                                     </small>
 
-                                    <br>
+                                    <div class="small mt-1">
+                                        <?= mas_e($recentRow['meeting_title']) ?>
+                                    </div>
 
                                     <a class="btn btn-sm btn-outline-primary rounded-4 fw-bold mt-2"
                                        target="_blank"
-                                       href="reports-print/report-pms-print.php?view=<?= (int)$recentRow['id'] ?>">
+                                       href="reports-print/report-mas-print.php?view=<?= (int)$recentRow['id'] ?>">
                                         Print
                                     </a>
                                 </div>
@@ -1403,7 +1451,7 @@ $pageMessageText = isset($_GET['error'])
 </div>
 
 <?php include 'includes/script.php'; ?>
-<script src="assets/js/script.js?v=49"></script>
+<script src="assets/js/script.js?v=48"></script>
 
 <script>
 const initialItems =
@@ -1418,12 +1466,15 @@ const previousData =
         JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES
     ) ?>;
 
-const pmsBody = document.getElementById('pmsBody');
+const masBody = document.getElementById('masBody');
 
 const snapshot = {
+    meeting_title: document.getElementById('meeting_title')?.value || '',
+    meeting_time: document.getElementById('meeting_time')?.value || '',
+    meeting_venue: document.getElementById('meeting_venue')?.value || '',
+    conducted_by: document.getElementById('conducted_by')?.value || '',
     architect: document.getElementById('architect')?.value || '',
     pmc: document.getElementById('pmc')?.value || '',
-    version: document.getElementById('version')?.value || 'R0',
     remarks: document.getElementById('remarks')?.value || '',
     items: initialItems
 };
@@ -1437,25 +1488,6 @@ function escapeHtml(value) {
         .replaceAll("'", '&#039;');
 }
 
-function calculateEndDate(row) {
-    const start = row.querySelector('.date-start').value;
-    const duration = parseInt(
-        row.querySelector('.duration').value || '0',
-        10
-    );
-
-    const end = row.querySelector('.date-end');
-
-    if (!start || duration <= 0) {
-        end.value = '';
-        return;
-    }
-
-    const date = new Date(start + 'T00:00:00');
-    date.setDate(date.getDate() + duration - 1);
-    end.value = date.toISOString().slice(0, 10);
-}
-
 function addRow(values = {}) {
     const row = document.createElement('tr');
 
@@ -1463,36 +1495,34 @@ function addRow(values = {}) {
         <td class="sl text-center fw-bold"></td>
 
         <td>
-            <input class="form-control rounded-4 task"
-                   placeholder="Enter task, activity or milestone"
-                   value="${escapeHtml(values.task_activity || '')}">
+            <input class="form-control rounded-4 attendee-name"
+                   placeholder="Full name"
+                   value="${escapeHtml(values.attendee_name || '')}">
         </td>
 
         <td>
-            <input type="number"
-                   class="form-control rounded-4 duration"
-                   min="0"
-                   placeholder="Days"
-                   value="${escapeHtml(values.duration_days || 0)}">
+            <input class="form-control rounded-4 organization"
+                   placeholder="Company / organization"
+                   value="${escapeHtml(values.organization || '')}">
         </td>
 
         <td>
-            <input type="date"
-                   class="form-control rounded-4 date-start"
-                   value="${escapeHtml(values.date_start || '')}">
+            <input class="form-control rounded-4 mobile-no"
+                   placeholder="Mobile number"
+                   value="${escapeHtml(values.mobile_no || '')}">
         </td>
 
         <td>
-            <input type="date"
-                   class="form-control rounded-4 date-end"
-                   value="${escapeHtml(values.date_end || '')}"
-                   readonly>
+            <input type="email"
+                   class="form-control rounded-4 email-id"
+                   placeholder="Email ID"
+                   value="${escapeHtml(values.email_id || '')}">
         </td>
 
         <td>
-            <input class="form-control rounded-4 remark"
-                   placeholder="Enter remark"
-                   value="${escapeHtml(values.remark || '')}">
+            <input class="form-control rounded-4 signature"
+                   placeholder="Signature / initials"
+                   value="${escapeHtml(values.signature || '')}">
         </td>
 
         <td class="text-center">
@@ -1503,19 +1533,12 @@ function addRow(values = {}) {
         </td>
     `;
 
-    pmsBody.appendChild(row);
-
-    row.querySelector('.date-start')
-        .addEventListener('change', () => calculateEndDate(row));
-
-    row.querySelector('.duration')
-        .addEventListener('input', () => calculateEndDate(row));
-
+    masBody.appendChild(row);
     renumberRows();
 }
 
 function renumberRows() {
-    [...pmsBody.rows].forEach((row, index) => {
+    [...masBody.rows].forEach((row, index) => {
         row.querySelector('.sl').textContent = index + 1;
     });
 
@@ -1525,19 +1548,23 @@ function renumberRows() {
 }
 
 function loadSource(source) {
-    document.getElementById('architect').value =
-        source?.architect || '';
+    [
+        'meeting_title',
+        'meeting_time',
+        'meeting_venue',
+        'conducted_by',
+        'architect',
+        'pmc',
+        'remarks'
+    ].forEach(id => {
+        const field = document.getElementById(id);
 
-    document.getElementById('pmc').value =
-        source?.pmc || '';
+        if (field) {
+            field.value = source?.[id] || '';
+        }
+    });
 
-    document.getElementById('version').value =
-        source?.version || 'R0';
-
-    document.getElementById('remarks').value =
-        source?.remarks || '';
-
-    pmsBody.innerHTML = '';
+    masBody.innerHTML = '';
 
     const items = source?.items?.length
         ? source.items
@@ -1560,11 +1587,9 @@ document.addEventListener('click', event => {
 
     const row = button.closest('tr');
 
-    if (pmsBody.rows.length <= 1) {
+    if (masBody.rows.length <= 1) {
         row.querySelectorAll('input').forEach(input => {
-            input.value = input.classList.contains('duration')
-                ? '0'
-                : '';
+            input.value = '';
         });
     } else {
         row.remove();
@@ -1585,31 +1610,31 @@ document.getElementById('loadPrevious')
 document.getElementById('projectPicker')
     ?.addEventListener('change', function () {
         const date =
-            document.getElementById('pms_date')?.value
-            || '<?= pmsr_e($reportDate) ?>';
+            document.getElementById('meeting_date')?.value
+            || '<?= mas_e($reportDate) ?>';
 
         window.location.href = this.value
-            ? 'pms.php?project_id='
+            ? 'mas.php?project_id='
                 + encodeURIComponent(this.value)
                 + '&report_date='
                 + encodeURIComponent(date)
-            : 'pms.php';
+            : 'mas.php';
     });
 
-document.getElementById('pmsForm')
+document.getElementById('masForm')
     ?.addEventListener('submit', function () {
-        const items = [...pmsBody.rows].map((row, index) => ({
+        const items = [...masBody.rows].map((row, index) => ({
             sl_no: index + 1,
-            task_activity:
-                row.querySelector('.task').value,
-            duration_days:
-                Number(row.querySelector('.duration').value || 0),
-            date_start:
-                row.querySelector('.date-start').value,
-            date_end:
-                row.querySelector('.date-end').value,
-            remark:
-                row.querySelector('.remark').value
+            attendee_name:
+                row.querySelector('.attendee-name').value,
+            organization:
+                row.querySelector('.organization').value,
+            mobile_no:
+                row.querySelector('.mobile-no').value,
+            email_id:
+                row.querySelector('.email-id').value,
+            signature:
+                row.querySelector('.signature').value
         }));
 
         document.getElementById('items_json').value =

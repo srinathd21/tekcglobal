@@ -1,976 +1,312 @@
 <?php
-session_start();
+require_once __DIR__ . "/includes/db.php";
+require_permission($conn, "can_view", "pms.php");
 
-require_once __DIR__ . '/includes/db.php';
-require_once __DIR__ . '/includes/pms-helper.php';
+function pmc_e($v)
+{
+    return htmlspecialchars($v ?? "", ENT_QUOTES, "UTF-8");
+}
 
-date_default_timezone_set('Asia/Kolkata');
+function pmc_date_show($date)
+{
+    return ($date && $date !== "0000-00-00") ? $date : "-";
+}
 
-if (empty($_SESSION['user_id']) && empty($_SESSION['employee_id'])) {
-    header('Location: login.php');
+function pmc_status_class($status)
+{
+    $status = strtolower(trim($status ?? ""));
+    if ($status === "completed") return "green";
+    if ($status === "ongoing" || $status === "active") return "blue";
+    if ($status === "cancelled") return "red";
+    return "amber";
+}
+
+function pmc_log_activity($conn, $type, $description, $referenceId = null)
+{
+    $employeeId = $_SESSION["employee_id"] ?? null;
+    $employeeName = $_SESSION["employee_name"] ?? ($_SESSION["name"] ?? "Admin");
+    $username = $_SESSION["username"] ?? null;
+    $designation = $_SESSION["designation"] ?? null;
+    $department = $_SESSION["department"] ?? null;
+    $ip = $_SERVER["REMOTE_ADDR"] ?? null;
+
+    $stmt = mysqli_prepare($conn, "
+        INSERT INTO activity_logs
+        (employee_id, employee_name, username, designation, department, activity_type, module, description, reference_id, ip_address)
+        VALUES (?, ?, ?, ?, ?, ?, 'pmc', ?, ?, ?)
+    ");
+
+    if ($stmt) {
+        mysqli_stmt_bind_param($stmt, "issssssis", $employeeId, $employeeName, $username, $designation, $department, $type, $description, $referenceId, $ip);
+        mysqli_stmt_execute($stmt);
+        mysqli_stmt_close($stmt);
+    }
+}
+
+function pmc_recalculate_schedule($conn, $scheduleId)
+{
+    $scheduleId = (int)$scheduleId;
+
+    if ($scheduleId <= 0) return;
+
+    mysqli_query($conn, "
+        UPDATE project_pmc_schedules s
+        SET
+            s.overall_start_date = (
+                SELECT MIN(i.planned_start_date)
+                FROM project_pmc_schedule_items i
+                WHERE i.schedule_id = s.id AND i.is_active = 1
+            ),
+            s.overall_end_date = (
+                SELECT MAX(i.planned_end_date)
+                FROM project_pmc_schedule_items i
+                WHERE i.schedule_id = s.id AND i.is_active = 1
+            ),
+            s.overall_duration_days = (
+                SELECT
+                    CASE
+                        WHEN MIN(i.planned_start_date) IS NOT NULL
+                         AND MAX(i.planned_end_date) IS NOT NULL
+                        THEN DATEDIFF(MAX(i.planned_end_date), MIN(i.planned_start_date)) + 1
+                        ELSE 0
+                    END
+                FROM project_pmc_schedule_items i
+                WHERE i.schedule_id = s.id AND i.is_active = 1
+            )
+        WHERE s.id = $scheduleId
+    ");
+}
+
+function pmc_redirect($params = [])
+{
+    $query = http_build_query($params);
+    header("Location: pms.php" . ($query ? "?" . $query : ""));
     exit;
 }
 
-function pmsr_e($value): string
-{
-    return htmlspecialchars((string)($value ?? ''), ENT_QUOTES, 'UTF-8');
-}
+$canPmcCreate = can_create($conn, "pms.php");
+$canPmcEdit = can_edit($conn, "pms.php");
+$canPmcDelete = can_delete($conn, "pms.php");
 
-function pmsr_employee_id(mysqli $conn): int
-{
-    if (!empty($_SESSION['employee_id'])) {
-        return (int)$_SESSION['employee_id'];
-    }
+if ($_SERVER["REQUEST_METHOD"] === "POST") {
+    $action = $_POST["action"] ?? "";
+    $currentUserId = $_SESSION["user_id"] ?? null;
 
-    $userId = (int)($_SESSION['user_id'] ?? 0);
+    try {
+        if ($action === "save_schedule") {
+            $scheduleId = (int)($_POST["schedule_id"] ?? 0);
 
-    if ($userId > 0) {
-        $query = mysqli_query(
-            $conn,
-            "SELECT employee_id FROM users WHERE id = $userId LIMIT 1"
-        );
-
-        if ($query && ($row = mysqli_fetch_assoc($query))) {
-            $employeeId = (int)($row['employee_id'] ?? 0);
-
-            if ($employeeId > 0) {
-                $_SESSION['employee_id'] = $employeeId;
-                return $employeeId;
+            if ($scheduleId > 0) {
+                require_permission($conn, "can_edit", "pms.php");
+            } else {
+                require_permission($conn, "can_create", "pms.php");
             }
-        }
-    }
 
-    return 0;
-}
+            $projectId = (int)($_POST["project_id"] ?? 0);
+            $scheduleName = trim($_POST["schedule_name"] ?? "");
+            $description = trim($_POST["description"] ?? "");
+            $status = trim($_POST["schedule_status"] ?? "draft");
 
-function pmsr_is_super_admin(mysqli $conn): bool
-{
-    $userId = (int)($_SESSION['user_id'] ?? 0);
-
-    if ($userId <= 0) {
-        return false;
-    }
-
-    $query = mysqli_query($conn, "
-        SELECT r.id
-        FROM user_roles ur
-        INNER JOIN roles r ON r.id = ur.role_id
-        WHERE ur.user_id = $userId
-          AND r.is_active = 1
-          AND (
-                r.role_slug = 'super-admin'
-             OR LOWER(r.role_name) = 'super admin'
-          )
-        LIMIT 1
-    ");
-
-    return $query && mysqli_num_rows($query) > 0;
-}
-
-function pmsr_report_access(mysqli $conn, string $permission): bool
-{
-    if (pmsr_is_super_admin($conn)) {
-        return true;
-    }
-
-    $allowed = [
-        'can_submit',
-        'can_view',
-        'can_remark_tl',
-        'can_remark_manager'
-    ];
-
-    if (!in_array($permission, $allowed, true)) {
-        return false;
-    }
-
-    $userId = (int)($_SESSION['user_id'] ?? 0);
-
-    if ($userId <= 0) {
-        return false;
-    }
-
-    $query = mysqli_query($conn, "
-        SELECT MAX(COALESCE(rtra.$permission, 0)) AS allowed
-        FROM user_roles ur
-        INNER JOIN report_type_role_access rtra
-            ON rtra.role_id = ur.role_id
-        INNER JOIN master_report_types rt
-            ON rt.id = rtra.report_type_id
-        WHERE ur.user_id = $userId
-          AND rt.report_code = 'PMS'
-          AND rt.is_active = 1
-    ");
-
-    return $query
-        && ($row = mysqli_fetch_assoc($query))
-        && (int)($row['allowed'] ?? 0) === 1;
-}
-
-function pmsr_project_allowed(
-    mysqli $conn,
-    int $projectId,
-    int $employeeId,
-    bool $isSuperAdmin
-): bool {
-    if ($isSuperAdmin) {
-        return true;
-    }
-
-    if ($projectId <= 0 || $employeeId <= 0) {
-        return false;
-    }
-
-    $query = mysqli_query($conn, "
-        SELECT p.id
-        FROM projects p
-        WHERE p.id = $projectId
-          AND p.deleted_at IS NULL
-          AND (
-                p.manager_employee_id = $employeeId
-             OR p.team_lead_employee_id = $employeeId
-             OR EXISTS (
-                    SELECT 1
-                    FROM project_assignments pa
-                    WHERE pa.project_id = p.id
-                      AND pa.employee_id = $employeeId
-                      AND pa.status = 'active'
-                )
-          )
-        LIMIT 1
-    ");
-
-    return $query && mysqli_num_rows($query) > 0;
-}
-
-function pmsr_columns(mysqli $conn, string $table): array
-{
-    $table = preg_replace('/[^A-Za-z0-9_]/', '', $table);
-    $columns = [];
-    $query = mysqli_query($conn, "SHOW COLUMNS FROM `$table`");
-
-    while ($query && ($row = mysqli_fetch_assoc($query))) {
-        $columns[$row['Field']] = true;
-    }
-
-    return $columns;
-}
-
-function pmsr_sql_value(mysqli $conn, $value): string
-{
-    if ($value === null) {
-        return 'NULL';
-    }
-
-    if (is_int($value) || is_float($value)) {
-        return (string)$value;
-    }
-
-    return "'" . mysqli_real_escape_string($conn, (string)$value) . "'";
-}
-
-function pmsr_report_type_id(mysqli $conn): int
-{
-    $query = mysqli_query($conn, "
-        SELECT id
-        FROM master_report_types
-        WHERE report_code = 'PMS'
-        LIMIT 1
-    ");
-
-    return ($query && ($row = mysqli_fetch_assoc($query)))
-        ? (int)$row['id']
-        : 0;
-}
-
-function pmsr_find_existing(
-    mysqli $conn,
-    int $submissionId,
-    int $projectId,
-    int $employeeId,
-    string $reportDate
-): int {
-    if ($submissionId > 0) {
-        $columns = pmsr_columns($conn, 'project_report_submissions');
-        $select = ['id'];
-
-        foreach (['report_reference_id', 'source_id', 'reference_id'] as $column) {
-            if (isset($columns[$column])) {
-                $select[] = $column;
+            if ($projectId <= 0 || $scheduleName === "") {
+                throw new Exception("Project and schedule name are required.");
             }
-        }
 
-        $query = mysqli_query(
-            $conn,
-            "SELECT " . implode(',', array_unique($select)) . "
-             FROM project_report_submissions
-             WHERE id = $submissionId
-             LIMIT 1"
-        );
-
-        if ($query && ($submission = mysqli_fetch_assoc($query))) {
-            foreach (['report_reference_id', 'source_id', 'reference_id'] as $column) {
-                $candidateId = (int)($submission[$column] ?? 0);
-
-                if ($candidateId <= 0) {
-                    continue;
-                }
-
-                $check = mysqli_query(
-                    $conn,
-                    "SELECT id FROM pms_main WHERE id = $candidateId LIMIT 1"
-                );
-
-                if ($check && mysqli_num_rows($check) > 0) {
-                    return $candidateId;
-                }
+            if (!in_array($status, ["draft", "pending", "ongoing", "completed", "cancelled"], true)) {
+                $status = "draft";
             }
-        }
-    }
 
-    $dateEsc = mysqli_real_escape_string($conn, $reportDate);
-
-    $query = mysqli_query($conn, "
-        SELECT id
-        FROM pms_main
-        WHERE project_id = $projectId
-          AND prepared_by = $employeeId
-          AND pms_date = '$dateEsc'
-        ORDER BY id DESC
-        LIMIT 1
-    ");
-
-    return ($query && ($row = mysqli_fetch_assoc($query)))
-        ? (int)$row['id']
-        : 0;
-}
-
-function pmsr_sync_submission(
-    mysqli $conn,
-    int $submissionId,
-    int $projectId,
-    int $employeeId,
-    string $reportDate,
-    int $pmsId,
-    string $pmsNo
-): void {
-    $reportTypeId = pmsr_report_type_id($conn);
-
-    if ($reportTypeId <= 0 || $pmsId <= 0) {
-        return;
-    }
-
-    $columns = pmsr_columns($conn, 'project_report_submissions');
-    $userId = (int)($_SESSION['user_id'] ?? 0);
-    $dateEsc = mysqli_real_escape_string($conn, $reportDate);
-
-    if ($submissionId <= 0) {
-        $query = mysqli_query($conn, "
-            SELECT id
-            FROM project_report_submissions
-            WHERE project_id = $projectId
-              AND report_type_id = $reportTypeId
-              AND submission_for_date = '$dateEsc'
-              AND (
-                    report_reference_id = $pmsId
-                 OR source_id = $pmsId
-                 OR reference_id = $pmsId
-                 OR report_no = '" . mysqli_real_escape_string($conn, $pmsNo) . "'
-              )
-            ORDER BY id DESC
-            LIMIT 1
-        ");
-
-        if ($query && ($row = mysqli_fetch_assoc($query))) {
-            $submissionId = (int)$row['id'];
-        }
-    }
-
-    $map = [
-        'report_no' => $pmsNo,
-        'report_number' => $pmsNo,
-        'submission_no' => $pmsNo,
-        'title' => 'Project Master Schedule',
-        'submitted_by_employee_id' => $employeeId,
-        'submitted_by_user_id' => $userId > 0 ? $userId : null,
-        'submission_for_date' => $reportDate,
-        'period_start' => $reportDate,
-        'period_end' => $reportDate,
-        'status' => 'submitted',
-        'submitted_at' => date('Y-m-d H:i:s'),
-        'source_table' => 'pms_main',
-        'source_id' => $pmsId,
-        'report_reference_table' => 'pms_main',
-        'report_reference_id' => $pmsId,
-        'reference_id' => $pmsId,
-        'updated_by' => $userId > 0 ? $userId : null,
-        'updated_at' => date('Y-m-d H:i:s'),
-    ];
-
-    if ($submissionId > 0) {
-        $sets = [];
-
-        foreach ($map as $field => $value) {
-            if (isset($columns[$field])) {
-                $sets[] = "`$field` = " . pmsr_sql_value($conn, $value);
-            }
-        }
-
-        if ($sets) {
-            mysqli_query(
-                $conn,
-                "UPDATE project_report_submissions
-                 SET " . implode(', ', $sets) . "
-                 WHERE id = $submissionId"
-            );
-        }
-
-        return;
-    }
-
-    $data = array_merge([
-        'project_id' => $projectId,
-        'report_type_id' => $reportTypeId,
-        'created_by' => $userId > 0 ? $userId : null,
-        'created_at' => date('Y-m-d H:i:s'),
-    ], $map);
-
-    $insertColumns = [];
-    $insertValues = [];
-
-    foreach ($data as $field => $value) {
-        if (isset($columns[$field])) {
-            $insertColumns[] = "`$field`";
-            $insertValues[] = pmsr_sql_value($conn, $value);
-        }
-    }
-
-    if ($insertColumns) {
-        mysqli_query(
-            $conn,
-            "INSERT INTO project_report_submissions
-            (" . implode(',', $insertColumns) . ")
-            VALUES
-            (" . implode(',', $insertValues) . ")"
-        );
-    }
-}
-
-function pmsr_redirect_hub(
-    int $projectId,
-    string $reportDate,
-    string $flag
-): void {
-    $flag = preg_replace('/[^A-Za-z0-9_]/', '', $flag);
-
-    header(
-        'Location: reports-hub.php'
-        . '?project_id=' . $projectId
-        . '&report_date=' . urlencode($reportDate)
-        . '&period_start=' . urlencode($reportDate)
-        . '&period_end=' . urlencode($reportDate)
-        . '&' . $flag . '=1'
-    );
-
-    exit;
-}
-
-$employeeId = pmsr_employee_id($conn);
-$isSuperAdmin = pmsr_is_super_admin($conn);
-
-if ($employeeId <= 0) {
-    header('Location: login.php');
-    exit;
-}
-
-if (!pmsr_report_access($conn, 'can_submit')) {
-    header(
-        'Location: reports-hub.php?error='
-        . urlencode('You do not have PMS submit access.')
-    );
-    exit;
-}
-
-$employeeQuery = mysqli_query($conn, "
-    SELECT
-        e.*,
-        r.role_name AS designation_name
-    FROM employees e
-    LEFT JOIN roles r ON r.id = e.role_id
-    WHERE e.id = $employeeId
-    LIMIT 1
-");
-
-$employee = $employeeQuery
-    ? mysqli_fetch_assoc($employeeQuery)
-    : null;
-
-$employeeName = (string)(
-    $employee['full_name']
-    ?? $_SESSION['employee_name']
-    ?? $_SESSION['name']
-    ?? ''
-);
-
-$designationName = (string)(
-    $employee['designation_name']
-    ?? $_SESSION['designation']
-    ?? ''
-);
-
-$projectId = (int)(
-    $_GET['project_id']
-    ?? $_POST['project_id']
-    ?? 0
-);
-
-$reportDate = trim((string)(
-    $_GET['report_date']
-    ?? $_POST['pms_date']
-    ?? date('Y-m-d')
-));
-
-if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $reportDate)) {
-    $reportDate = date('Y-m-d');
-}
-
-$resubmitSubmissionId = (int)(
-    $_GET['resubmit_submission_id']
-    ?? $_POST['resubmit_submission_id']
-    ?? 0
-);
-
-$projects = [];
-
-if ($isSuperAdmin) {
-    $projectsQuery = mysqli_query($conn, "
-        SELECT
-            p.id,
-            p.project_name,
-            p.project_code,
-            p.project_location,
-            p.client_id,
-            c.client_name
-        FROM projects p
-        LEFT JOIN clients c ON c.id = p.client_id
-        WHERE p.deleted_at IS NULL
-        ORDER BY p.project_name
-    ");
-} else {
-    $projectsQuery = mysqli_query($conn, "
-        SELECT DISTINCT
-            p.id,
-            p.project_name,
-            p.project_code,
-            p.project_location,
-            p.client_id,
-            c.client_name
-        FROM projects p
-        LEFT JOIN clients c ON c.id = p.client_id
-        LEFT JOIN project_assignments pa
-            ON pa.project_id = p.id
-           AND pa.status = 'active'
-        WHERE p.deleted_at IS NULL
-          AND (
-                p.manager_employee_id = $employeeId
-             OR p.team_lead_employee_id = $employeeId
-             OR pa.employee_id = $employeeId
-          )
-        ORDER BY p.project_name
-    ");
-}
-
-while ($projectsQuery && ($row = mysqli_fetch_assoc($projectsQuery))) {
-    $projects[] = $row;
-}
-
-$project = null;
-
-if (
-    $projectId > 0
-    && pmsr_project_allowed(
-        $conn,
-        $projectId,
-        $employeeId,
-        $isSuperAdmin
-    )
-) {
-    $query = mysqli_query($conn, "
-        SELECT
-            p.*,
-            c.client_name,
-            c.company_name,
-            mpt.project_type_name
-        FROM projects p
-        LEFT JOIN clients c ON c.id = p.client_id
-        LEFT JOIN master_project_types mpt
-            ON mpt.id = p.project_type_id
-        WHERE p.id = $projectId
-          AND p.deleted_at IS NULL
-        LIMIT 1
-    ");
-
-    if ($query) {
-        $project = mysqli_fetch_assoc($query);
-    }
-}
-
-$currentSchedule = $projectId > 0
-    ? pms_project_schedule($conn, $projectId)
-    : null;
-
-[$scheduleStart, $scheduleEnd] =
-    pms_schedule_date_range($currentSchedule, $project);
-
-$defaultNo = '';
-
-if ($projectId > 0) {
-    $prefix = 'PMS/' . $projectId . '/' . date('Ym', strtotime($reportDate)) . '/';
-    $prefixEsc = mysqli_real_escape_string($conn, $prefix);
-
-    $query = mysqli_query(
-        $conn,
-        "SELECT COUNT(*) AS total
-         FROM pms_main
-         WHERE pms_no LIKE '$prefixEsc%'"
-    );
-
-    $count = $query
-        ? (int)(mysqli_fetch_assoc($query)['total'] ?? 0)
-        : 0;
-
-    $defaultNo = $prefix
-        . str_pad((string)($count + 1), 3, '0', STR_PAD_LEFT);
-}
-
-$existingReport = null;
-
-if ($resubmitSubmissionId > 0 && $projectId > 0) {
-    $existingId = pmsr_find_existing(
-        $conn,
-        $resubmitSubmissionId,
-        $projectId,
-        $employeeId,
-        $reportDate
-    );
-
-    if ($existingId > 0) {
-        $query = mysqli_query(
-            $conn,
-            "SELECT * FROM pms_main WHERE id = $existingId LIMIT 1"
-        );
-
-        if ($query) {
-            $existingReport = mysqli_fetch_assoc($query);
-        }
-    }
-}
-
-$previousReport = null;
-
-if ($projectId > 0) {
-    $dateEsc = mysqli_real_escape_string($conn, $reportDate);
-
-    foreach ([
-        "project_id = $projectId AND prepared_by = $employeeId AND pms_date < '$dateEsc'",
-        "project_id = $projectId AND prepared_by = $employeeId",
-        "project_id = $projectId"
-    ] as $where) {
-        $query = mysqli_query($conn, "
-            SELECT *
-            FROM pms_main
-            WHERE $where
-            ORDER BY pms_date DESC, created_at DESC, id DESC
-            LIMIT 1
-        ");
-
-        if ($query && ($previousReport = mysqli_fetch_assoc($query))) {
-            break;
-        }
-    }
-}
-
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_pms'])) {
-    $postProjectId = (int)($_POST['project_id'] ?? 0);
-    $postSubmissionId = (int)($_POST['resubmit_submission_id'] ?? 0);
-
-    $pmsNo = trim((string)($_POST['pms_no'] ?? ''));
-    $pmsDate = trim((string)($_POST['pms_date'] ?? ''));
-    $architect = trim((string)($_POST['architect'] ?? ''));
-    $pmc = trim((string)($_POST['pmc'] ?? ''));
-    $version = trim((string)($_POST['version'] ?? 'R0'));
-    $remarks = trim((string)($_POST['remarks'] ?? ''));
-
-    $items = json_decode(
-        (string)($_POST['items_json'] ?? '[]'),
-        true
-    );
-
-    $error = '';
-
-    if (
-        !pmsr_project_allowed(
-            $conn,
-            $postProjectId,
-            $employeeId,
-            $isSuperAdmin
-        )
-    ) {
-        $error = 'Invalid project selection.';
-    } elseif ($pmsNo === '') {
-        $error = 'PMS No is required.';
-    } elseif (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $pmsDate)) {
-        $error = 'Valid PMS date is required.';
-    } elseif (!is_array($items)) {
-        $error = 'Invalid schedule rows.';
-    }
-
-    $items = array_values(array_filter(
-        is_array($items) ? $items : [],
-        static fn($row) =>
-            trim((string)($row['task_activity'] ?? '')) !== ''
-    ));
-
-    if ($error === '' && !$items) {
-        $error = 'Please enter at least one task or milestone.';
-    }
-
-    if ($error === '') {
-        $query = mysqli_query($conn, "
-            SELECT
-                p.project_name,
-                p.client_id,
-                c.client_name
-            FROM projects p
-            LEFT JOIN clients c ON c.id = p.client_id
-            WHERE p.id = $postProjectId
-            LIMIT 1
-        ");
-
-        $projectData = $query
-            ? mysqli_fetch_assoc($query)
-            : null;
-
-        $projectName = (string)($projectData['project_name'] ?? '');
-        $clientId = (int)($projectData['client_id'] ?? 0);
-        $clientName = (string)($projectData['client_name'] ?? '');
-
-        mysqli_begin_transaction($conn);
-
-        try {
-            if ($postSubmissionId > 0) {
-                $pmsId = pmsr_find_existing(
-                    $conn,
-                    $postSubmissionId,
-                    $postProjectId,
-                    $employeeId,
-                    $pmsDate
-                );
-
-                if ($pmsId <= 0) {
-                    throw new RuntimeException(
-                        'Original PMS not found for resubmission.'
-                    );
-                }
-
+            if ($scheduleId > 0) {
                 $stmt = mysqli_prepare($conn, "
-                    UPDATE pms_main
-                    SET
-                        pms_no = ?,
-                        project_id = ?,
-                        site_id = ?,
-                        client_id = ?,
-                        project_name = ?,
-                        client_name = ?,
-                        architect = ?,
-                        pmc = ?,
-                        version = ?,
-                        pms_date = ?,
-                        prepared_by_name = ?,
-                        remarks = ?,
-                        updated_at = NOW()
+                    UPDATE project_pmc_schedules
+                    SET project_id = ?, schedule_name = ?, description = ?, schedule_status = ?, updated_by = ?
                     WHERE id = ?
                 ");
-
-                if (!$stmt) {
-                    throw new RuntimeException(mysqli_error($conn));
-                }
-
-                mysqli_stmt_bind_param(
-                    $stmt,
-                    'siiissssssssi',
-                    $pmsNo,
-                    $postProjectId,
-                    $postProjectId,
-                    $clientId,
-                    $projectName,
-                    $clientName,
-                    $architect,
-                    $pmc,
-                    $version,
-                    $pmsDate,
-                    $employeeName,
-                    $remarks,
-                    $pmsId
-                );
-
-                if (!mysqli_stmt_execute($stmt)) {
-                    throw new RuntimeException(mysqli_stmt_error($stmt));
-                }
-
+                mysqli_stmt_bind_param($stmt, "isssii", $projectId, $scheduleName, $description, $status, $currentUserId, $scheduleId);
+                mysqli_stmt_execute($stmt);
                 mysqli_stmt_close($stmt);
 
-                mysqli_query(
-                    $conn,
-                    "DELETE FROM pms_details WHERE pms_main_id = $pmsId"
-                );
+                pmc_log_activity($conn, "UPDATE", "Updated PMC schedule", $scheduleId);
             } else {
                 $stmt = mysqli_prepare($conn, "
-                    INSERT INTO pms_main
-                    (
-                        pms_no,
-                        project_id,
-                        site_id,
-                        client_id,
-                        project_name,
-                        client_name,
-                        architect,
-                        pmc,
-                        version,
-                        pms_date,
-                        prepared_by,
-                        prepared_by_name,
-                        remarks
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO project_pmc_schedules
+                    (project_id, schedule_name, description, schedule_status, created_by)
+                    VALUES (?, ?, ?, ?, ?)
                 ");
-
-                if (!$stmt) {
-                    throw new RuntimeException(mysqli_error($conn));
-                }
-
-                mysqli_stmt_bind_param(
-                    $stmt,
-                    'siiissssssiss',
-                    $pmsNo,
-                    $postProjectId,
-                    $postProjectId,
-                    $clientId,
-                    $projectName,
-                    $clientName,
-                    $architect,
-                    $pmc,
-                    $version,
-                    $pmsDate,
-                    $employeeId,
-                    $employeeName,
-                    $remarks
-                );
-
-                if (!mysqli_stmt_execute($stmt)) {
-                    throw new RuntimeException(mysqli_stmt_error($stmt));
-                }
-
-                $pmsId = (int)mysqli_insert_id($conn);
+                mysqli_stmt_bind_param($stmt, "isssi", $projectId, $scheduleName, $description, $status, $currentUserId);
+                mysqli_stmt_execute($stmt);
+                $scheduleId = mysqli_insert_id($conn);
                 mysqli_stmt_close($stmt);
+
+                pmc_log_activity($conn, "CREATE", "Created PMC schedule", $scheduleId);
             }
 
-            $detailStmt = mysqli_prepare($conn, "
-                INSERT INTO pms_details
-                (
-                    pms_main_id,
-                    sl_no,
-                    task_activity,
-                    duration_days,
-                    date_start,
-                    date_end,
-                    remark
-                )
-                VALUES (?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?)
-            ");
-
-            if (!$detailStmt) {
-                throw new RuntimeException(mysqli_error($conn));
-            }
-
-            foreach ($items as $index => $item) {
-                $slNo = $index + 1;
-                $task = trim((string)($item['task_activity'] ?? ''));
-                $duration = max(0, (int)($item['duration_days'] ?? 0));
-                $startDate = trim((string)($item['date_start'] ?? ''));
-                $endDate = trim((string)($item['date_end'] ?? ''));
-                $remark = trim((string)($item['remark'] ?? ''));
-
-                if (
-                    $endDate === ''
-                    && $startDate !== ''
-                    && $duration > 0
-                ) {
-                    $endDate = date(
-                        'Y-m-d',
-                        strtotime(
-                            $startDate . ' +' . max(0, $duration - 1) . ' days'
-                        )
-                    );
-                }
-
-                mysqli_stmt_bind_param(
-                    $detailStmt,
-                    'iisisss',
-                    $pmsId,
-                    $slNo,
-                    $task,
-                    $duration,
-                    $startDate,
-                    $endDate,
-                    $remark
-                );
-
-                if (!mysqli_stmt_execute($detailStmt)) {
-                    throw new RuntimeException(
-                        mysqli_stmt_error($detailStmt)
-                    );
-                }
-            }
-
-            mysqli_stmt_close($detailStmt);
-
-            pmsr_sync_submission(
-                $conn,
-                $postSubmissionId,
-                $postProjectId,
-                $employeeId,
-                $pmsDate,
-                $pmsId,
-                $pmsNo
-            );
-
-            mysqli_commit($conn);
-
-            pmsr_redirect_hub(
-                $postProjectId,
-                $pmsDate,
-                $postSubmissionId > 0
-                    ? 'resubmitted'
-                    : 'saved'
-            );
-        } catch (Throwable $exception) {
-            mysqli_rollback($conn);
-            $error = $exception->getMessage();
+            pmc_recalculate_schedule($conn, $scheduleId);
+            pmc_redirect(["success" => 1]);
         }
-    }
 
-    if ($error !== '') {
-        header(
-            'Location: pms.php'
-            . '?project_id=' . $postProjectId
-            . '&report_date=' . urlencode($pmsDate)
-            . '&error=' . urlencode($error)
-        );
-        exit;
-    }
-}
+        if ($action === "cancel_schedule") {
+            require_permission($conn, "can_delete", "pms.php");
 
-$formData = [
-    'pms_no' => $existingReport['pms_no'] ?? $defaultNo,
-    'pms_date' => $existingReport['pms_date'] ?? $reportDate,
-    'architect' => $existingReport['architect'] ?? '',
-    'pmc' => $existingReport['pmc'] ?? '',
-    'version' => $existingReport['version'] ?? 'R0',
-    'remarks' => $existingReport['remarks'] ?? '',
-    'items' => [],
-];
+            $scheduleId = (int)($_POST["schedule_id"] ?? 0);
 
-if ($existingReport) {
-    $query = mysqli_query(
-        $conn,
-        "SELECT *
-         FROM pms_details
-         WHERE pms_main_id = " . (int)$existingReport['id'] . "
-         ORDER BY sl_no, id"
-    );
+            if ($scheduleId <= 0) {
+                throw new Exception("Invalid schedule.");
+            }
 
-    while ($query && ($row = mysqli_fetch_assoc($query))) {
-        $formData['items'][] = $row;
+            $stmt = mysqli_prepare($conn, "
+                UPDATE project_pmc_schedules
+                SET schedule_status = 'cancelled', updated_by = ?
+                WHERE id = ?
+            ");
+            mysqli_stmt_bind_param($stmt, "ii", $currentUserId, $scheduleId);
+            mysqli_stmt_execute($stmt);
+            mysqli_stmt_close($stmt);
+
+            pmc_log_activity($conn, "DELETE", "Cancelled PMC schedule", $scheduleId);
+            pmc_redirect(["deleted" => 1]);
+        }
+
+        throw new Exception("Invalid action.");
+    } catch (Throwable $e) {
+        pmc_redirect(["error" => $e->getMessage()]);
     }
 }
 
-if (!$formData['items']) {
-    $formData['items'] = array_fill(0, 3, [
-        'task_activity' => '',
-        'duration_days' => 0,
-        'date_start' => '',
-        'date_end' => '',
-        'remark' => '',
-    ]);
+$pageMessageType = "";
+$pageMessageText = "";
+
+if (isset($_GET["success"])) {
+    $pageMessageType = "success";
+    $pageMessageText = "PMC schedule saved successfully.";
+} elseif (isset($_GET["deleted"])) {
+    $pageMessageType = "success";
+    $pageMessageText = "PMC schedule cancelled successfully.";
+} elseif (isset($_GET["error"])) {
+    $pageMessageType = "error";
+    $pageMessageText = trim($_GET["error"]) !== "" ? trim($_GET["error"]) : "Something went wrong. Please try again.";
 }
 
-$previousPayload = null;
+$search = trim($_GET["search"] ?? "");
+$projectFilter = isset($_GET["project_id"]) ? (int)$_GET["project_id"] : 0;
+$statusFilter = trim($_GET["schedule_status"] ?? "");
+$page = max(1, (int)($_GET["page"] ?? 1));
+$perPage = (int)($_GET["per_page"] ?? 10);
+$allowedPerPage = [10, 25, 50, 100];
 
-if ($previousReport) {
-    $items = [];
-
-    $query = mysqli_query(
-        $conn,
-        "SELECT *
-         FROM pms_details
-         WHERE pms_main_id = " . (int)$previousReport['id'] . "
-         ORDER BY sl_no, id"
-    );
-
-    while ($query && ($row = mysqli_fetch_assoc($query))) {
-        $items[] = $row;
-    }
-
-    $previousPayload = [
-        'pms_no' => $previousReport['pms_no'] ?? '',
-        'pms_date' => $previousReport['pms_date'] ?? '',
-        'architect' => $previousReport['architect'] ?? '',
-        'pmc' => $previousReport['pmc'] ?? '',
-        'version' => $previousReport['version'] ?? 'R0',
-        'remarks' => $previousReport['remarks'] ?? '',
-        'items' => $items,
-    ];
+if (!in_array($perPage, $allowedPerPage, true)) {
+    $perPage = 10;
 }
 
-$recent = [];
+$where = ["s.schedule_status <> 'cancelled'", "p.deleted_at IS NULL"];
 
-$query = mysqli_query($conn, "
+if ($projectFilter > 0) {
+    $where[] = "s.project_id = " . (int)$projectFilter;
+}
+
+if ($statusFilter !== "" && in_array($statusFilter, ["draft", "pending", "ongoing", "completed"], true)) {
+    $where[] = "s.schedule_status = '" . mysqli_real_escape_string($conn, $statusFilter) . "'";
+}
+
+if ($search !== "") {
+    $like = mysqli_real_escape_string($conn, "%" . $search . "%");
+    $where[] = "(s.schedule_name LIKE '$like' OR p.project_name LIKE '$like' OR p.project_code LIKE '$like' OR p.project_location LIKE '$like')";
+}
+
+$whereSql = implode(" AND ", $where);
+
+$countQ = mysqli_query($conn, "
+    SELECT COUNT(*) AS total
+    FROM project_pmc_schedules s
+    INNER JOIN projects p ON p.id = s.project_id
+    WHERE $whereSql
+");
+$totalRows = (int)(mysqli_fetch_assoc($countQ)["total"] ?? 0);
+$totalPages = max(1, (int)ceil($totalRows / $perPage));
+$page = min($page, $totalPages);
+$offset = ($page - 1) * $perPage;
+
+$schedulesQ = mysqli_query($conn, "
     SELECT
-        m.id,
-        m.pms_no,
-        m.pms_date,
-        m.project_name,
-        COUNT(d.id) AS task_count
-    FROM pms_main m
-    LEFT JOIN pms_details d ON d.pms_main_id = m.id
-    WHERE m.prepared_by = $employeeId
-    GROUP BY m.id
-    ORDER BY m.created_at DESC
-    LIMIT 10
+        s.*,
+        p.project_name,
+        p.project_code,
+        p.project_location,
+        COUNT(i.id) AS total_items,
+        SUM(CASE WHEN i.item_type = 'topic' THEN 1 ELSE 0 END) AS topic_count,
+        SUM(CASE WHEN i.item_type = 'task' THEN 1 ELSE 0 END) AS task_count,
+        SUM(CASE WHEN i.item_status = 'pending' THEN 1 ELSE 0 END) AS pending_count,
+        SUM(CASE WHEN i.item_status = 'ongoing' THEN 1 ELSE 0 END) AS ongoing_count,
+        SUM(CASE WHEN i.item_status = 'completed' THEN 1 ELSE 0 END) AS completed_count,
+        ROUND(AVG(i.progress_percent), 2) AS avg_progress
+    FROM project_pmc_schedules s
+    INNER JOIN projects p ON p.id = s.project_id
+    LEFT JOIN project_pmc_schedule_items i
+        ON i.schedule_id = s.id
+       AND i.is_active = 1
+    WHERE $whereSql
+    GROUP BY s.id
+    ORDER BY s.id DESC
+    LIMIT $perPage OFFSET $offset
 ");
 
-while ($query && ($row = mysqli_fetch_assoc($query))) {
-    $recent[] = $row;
+$schedules = [];
+if ($schedulesQ) {
+    while ($row = mysqli_fetch_assoc($schedulesQ)) {
+        $schedules[] = $row;
+    }
 }
 
-$pageMessageType = isset($_GET['error']) ? 'error' : '';
-$pageMessageText = isset($_GET['error'])
-    ? trim((string)$_GET['error'])
-    : '';
+$projectsQ = mysqli_query($conn, "
+    SELECT id, project_name, project_code
+    FROM projects
+    WHERE deleted_at IS NULL
+    ORDER BY project_name ASC
+");
+
+$projectsModalQ = mysqli_query($conn, "
+    SELECT id, project_name, project_code
+    FROM projects
+    WHERE deleted_at IS NULL
+    ORDER BY project_name ASC
+");
+
+$stats = [
+    "total" => (int)(mysqli_fetch_assoc(mysqli_query($conn, "SELECT COUNT(*) AS total FROM project_pmc_schedules WHERE schedule_status <> 'cancelled'"))["total"] ?? 0),
+    "ongoing" => (int)(mysqli_fetch_assoc(mysqli_query($conn, "SELECT COUNT(*) AS total FROM project_pmc_schedules WHERE schedule_status = 'ongoing'"))["total"] ?? 0),
+    "pending" => (int)(mysqli_fetch_assoc(mysqli_query($conn, "SELECT COUNT(*) AS total FROM project_pmc_schedules WHERE schedule_status IN ('draft','pending')"))["total"] ?? 0),
+    "completed" => (int)(mysqli_fetch_assoc(mysqli_query($conn, "SELECT COUNT(*) AS total FROM project_pmc_schedules WHERE schedule_status = 'completed'"))["total"] ?? 0)
+];
+
+function pmc_page_url($pageNumber)
+{
+    $query = $_GET;
+    $query["page"] = $pageNumber;
+    return "pms.php?" . http_build_query($query);
+}
+
+function pmc_per_page_url($perPage)
+{
+    $query = $_GET;
+    $query["per_page"] = $perPage;
+    $query["page"] = 1;
+    return "pms.php?" . http_build_query($query);
+}
+
+$fromRow = $totalRows > 0 ? $offset + 1 : 0;
+$toRow = min($offset + $perPage, $totalRows);
 ?>
 <!DOCTYPE html>
 <html lang="en" class="light">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>PMS - TEK-C PMC Construction</title>
 
-    <?php include 'includes/links.php'; ?>
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>PMC Schedules - TEK-C PMC Construction</title>
+    <?php include("includes/links.php"); ?>
 
     <style>
         .page-head-card,
-        .section-box {
+        .filter-card {
             background: var(--card-bg);
             border: 1px solid var(--border-soft);
             border-radius: 22px;
@@ -978,643 +314,583 @@ $pageMessageText = isset($_GET['error'])
             padding: 16px;
         }
 
-        .section-box {
-            padding: 18px;
-        }
-
-        .mini-head {
+        .kpi-row>[class*="col"] {
             display: flex;
-            align-items: center;
-            gap: 12px;
-            margin-bottom: 14px;
         }
 
-        .mini-icon {
-            width: 44px;
-            height: 44px;
-            border-radius: 16px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            background: rgba(37, 99, 235, .12);
-            color: #2563eb;
-        }
-
-        .form-control,
-        .form-select {
+        .kpi-card {
+            width: 100%;
+            min-height: 118px;
             background: var(--card-bg);
-            color: var(--text-main);
-            border-color: var(--border-soft);
-            min-height: 42px;
-            font-size: 13px;
-            font-weight: 700;
+            border: 1px solid var(--border-soft);
+            border-radius: 24px;
+            box-shadow: var(--shadow-card);
+            padding: 22px 24px;
+            display: flex;
+            align-items: center;
+            gap: 22px;
         }
 
-        .pms-table {
-            min-width: 1250px;
-        }
-
-        .pms-table th {
-            font-size: 11px;
-            text-transform: uppercase;
-            color: var(--text-muted);
-            font-weight: 900;
-            background: rgba(148, 163, 184, .10);
-            white-space: nowrap;
-            text-align: center;
-            vertical-align: middle;
-        }
-
-        .badge-soft {
+        .kpi-icon {
+            width: 58px;
+            height: 58px;
+            min-width: 58px;
+            border-radius: 22px;
             display: inline-flex;
             align-items: center;
-            gap: 7px;
-            border: 1px solid var(--border-soft);
-            background: rgba(148, 163, 184, .08);
-            border-radius: 999px;
-            padding: 7px 12px;
-            font-size: 12px;
-            font-weight: 900;
+            justify-content: center;
         }
 
-        .recent-card {
+        .kpi-label {
+            color: var(--text-muted);
+            font-size: 13px;
+            font-weight: 800;
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            white-space: nowrap;
+        }
+
+        .kpi-value {
+            color: var(--text-main);
+            font-size: 24px;
+            font-weight: 900;
+            margin: 4px 0 2px;
+            line-height: 1.15;
+        }
+
+        .kpi-sub {
+            color: var(--text-muted);
+            font-size: 12px;
+            font-weight: 600;
+            margin: 0;
+        }
+
+        .status-pill {
+            border-radius: 999px;
+            padding: 5px 10px;
+            font-size: 11px;
+            font-weight: 900;
+            display: inline-flex;
+            align-items: center;
+            text-transform: capitalize;
+        }
+
+        .status-pill.green { background: rgba(16, 185, 129, .15); color: #059669; }
+        .status-pill.blue { background: rgba(37, 99, 235, .15); color: #2563eb; }
+        .status-pill.amber { background: rgba(245, 158, 11, .15); color: #d97706; }
+        .status-pill.red { background: rgba(239, 68, 68, .15); color: #dc2626; }
+
+        .progress-mini {
+            height: 7px;
+            min-width: 90px;
+            background: rgba(148, 163, 184, .20);
+        }
+
+        .progress-mini .progress-bar {
+            background: linear-gradient(135deg, var(--brand-1), var(--brand-2));
+        }
+
+        .modal-content {
+            background: var(--card-bg);
+            color: var(--text-main);
             border: 1px solid var(--border-soft);
-            border-radius: 18px;
-            padding: 12px;
-            background: rgba(148, 163, 184, .06);
+            border-radius: 24px;
+            box-shadow: var(--shadow-card);
+        }
+
+        .modal-header,
+        .modal-footer {
+            border-color: var(--border-soft);
+        }
+
+        .pagination-wrap {
+            border-top: 1px solid var(--border-soft);
+            padding: 14px 16px;
+            background: rgba(148, 163, 184, .04);
+        }
+
+        .page-link-custom {
+            min-width: 36px;
+            height: 36px;
+            border-radius: 13px;
+            border: 1px solid var(--border-soft);
+            background: var(--card-bg);
+            color: var(--text-main);
+            font-size: 12px;
+            font-weight: 900;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            text-decoration: none;
+            padding: 0 10px;
+        }
+
+        .page-link-custom:hover {
+            color: var(--text-main);
+            background: rgba(148, 163, 184, .10);
+        }
+
+        .page-link-custom.active {
+            color: #fff;
+            background-image: linear-gradient(135deg, var(--brand-1), var(--brand-2));
+            border-color: transparent;
+        }
+
+        .page-link-custom.disabled {
+            opacity: .45;
+            pointer-events: none;
+        }
+
+        .per-page-select {
+            width: 88px;
+            min-height: 36px;
+            border-radius: 13px;
+            font-size: 12px;
+            font-weight: 800;
         }
     </style>
 </head>
+
 <body>
-<div id="mobileOverlay"
-     class="d-none position-fixed top-0 start-0 w-100 h-100 bg-dark bg-opacity-50 z-3 d-xl-none"></div>
+    <div id="mobileOverlay" class="d-none position-fixed top-0 start-0 w-100 h-100 bg-dark bg-opacity-50 z-3 d-xl-none"></div>
 
-<?php include 'includes/page-message.php'; ?>
+    <?php include("includes/page-message.php"); ?>
 
-<div class="min-vh-100 d-flex">
-    <?php include 'includes/sidebar.php'; ?>
+    <div class="min-vh-100 d-flex">
+        <?php include("includes/sidebar.php"); ?>
 
-    <main id="main">
-        <?php include 'includes/nav.php'; ?>
+        <main id="main">
+            <?php include("includes/nav.php"); ?>
 
-        <section class="page-section p-3">
-            <div class="page-head-card mb-3">
-                <div class="d-flex flex-column flex-lg-row justify-content-between gap-3">
-                    <div>
-                        <h1 class="h4 fw-bold mb-1">
-                            <?= $resubmitSubmissionId > 0
-                                ? 'Resubmit Project Master Schedule (PMS)'
-                                : 'Project Master Schedule (PMS)' ?>
-                        </h1>
-
-                        <p class="text-muted-custom mb-0 small">
-                            Plan project activities, milestones and timelines.
-                        </p>
-                    </div>
-
-                    <div class="d-flex flex-wrap gap-2 align-items-center">
-                        <label class="badge-soft mb-0 <?= !$previousPayload ? 'opacity-75' : '' ?>">
-                            <input type="checkbox"
-                                   id="loadPrevious"
-                                   <?= !$previousPayload ? 'disabled' : '' ?>>
-
-                            <span>
-                                <strong>Load previous data</strong>
-                                <small class="d-block text-muted-custom">
-                                    <?= $previousPayload
-                                        ? pmsr_e($previousPayload['pms_no'])
-                                            . ' · '
-                                            . pmsr_e(date(
-                                                'd M Y',
-                                                strtotime($previousPayload['pms_date'])
-                                            ))
-                                        : 'No previous data' ?>
-                                </small>
-                            </span>
-                        </label>
-
-                        <span class="badge-soft">
-                            <i data-lucide="user" style="width:15px"></i>
-                            <?= pmsr_e($employeeName) ?>
-                        </span>
-
-                        <span class="badge-soft">
-                            <?= pmsr_e($designationName) ?>
-                        </span>
-
-                        <a href="reports-hub.php"
-                           class="btn btn-outline-secondary rounded-4 fw-bold btn-sm">
-                            Back to Reports Hub
-                        </a>
-                    </div>
-                </div>
-            </div>
-
-            <div class="section-box mb-3">
-                <div class="mini-head">
-                    <div class="mini-icon">
-                        <i data-lucide="map-pin"></i>
-                    </div>
-
-                    <div>
-                        <h2 class="fw-bold fs-6 mb-1">Project Selection</h2>
-                        <p class="text-muted-custom small mb-0">
-                            Choose an assigned project.
-                        </p>
-                    </div>
-                </div>
-
-                <div class="row g-3 align-items-end">
-                    <div class="col-lg-9">
-                        <label class="form-label fw-bold small">
-                            Assigned Project
-                        </label>
-
-                        <select id="projectPicker"
-                                class="form-select rounded-4">
-                            <option value="">-- Select Assigned Project --</option>
-
-                            <?php foreach ($projects as $projectOption): ?>
-                                <option value="<?= (int)$projectOption['id'] ?>"
-                                    <?= (int)$projectOption['id'] === $projectId
-                                        ? 'selected'
-                                        : '' ?>>
-                                    <?= pmsr_e($projectOption['project_name']) ?>
-                                    <?= !empty($projectOption['project_code'])
-                                        ? ' (' . pmsr_e($projectOption['project_code']) . ')'
-                                        : '' ?>
-                                    - <?= pmsr_e($projectOption['project_location'] ?: '-') ?>
-                                </option>
-                            <?php endforeach; ?>
-                        </select>
-                    </div>
-
-                    <div class="col-lg-3">
-                        <a href="pms.php"
-                           class="btn btn-outline-secondary rounded-4 fw-bold w-100">
-                            Reset
-                        </a>
-                    </div>
-                </div>
-            </div>
-
-            <div class="section-box mb-3">
-                <div class="mini-head">
-                    <div class="mini-icon">
-                        <i data-lucide="building-2"></i>
-                    </div>
-
-                    <div>
-                        <h2 class="fw-bold fs-6 mb-1">Project Details</h2>
-                        <p class="text-muted-custom small mb-0">
-                            Current project and preferred PMS schedule.
-                        </p>
-                    </div>
-                </div>
-
-                <?php if (!$project): ?>
-                    <p class="text-muted-custom fw-bold mb-0">
-                        Please select a project.
-                    </p>
-                <?php else: ?>
-                    <div class="row g-3">
-                        <div class="col-md-4">
-                            <small class="text-muted-custom fw-bold">Project</small>
-                            <div class="fw-bold"><?= pmsr_e($project['project_name']) ?></div>
-                        </div>
-
-                        <div class="col-md-4">
-                            <small class="text-muted-custom fw-bold">Client</small>
-                            <div class="fw-bold"><?= pmsr_e($project['client_name'] ?: '-') ?></div>
-                        </div>
-
-                        <div class="col-md-4">
-                            <small class="text-muted-custom fw-bold">Location</small>
-                            <div class="fw-bold"><?= pmsr_e($project['project_location'] ?: '-') ?></div>
-                        </div>
-
-                        <div class="col-md-4">
-                            <small class="text-muted-custom fw-bold">PMS Schedule</small>
-                            <div class="fw-bold">
-                                <?= pmsr_e($currentSchedule['schedule_name'] ?? 'PMS Schedule') ?>
-                            </div>
-                        </div>
-
-                        <div class="col-md-4">
-                            <small class="text-muted-custom fw-bold">PMS Start</small>
-                            <div class="fw-bold"><?= pmsr_e($scheduleStart ?: '-') ?></div>
-                        </div>
-
-                        <div class="col-md-4">
-                            <small class="text-muted-custom fw-bold">PMS End</small>
-                            <div class="fw-bold"><?= pmsr_e($scheduleEnd ?: '-') ?></div>
-                        </div>
-                    </div>
-                <?php endif; ?>
-            </div>
-
-            <form method="POST" id="pmsForm">
-                <input type="hidden" name="submit_pms" value="1">
-                <input type="hidden" name="project_id" value="<?= (int)$projectId ?>">
-                <input type="hidden"
-                       name="resubmit_submission_id"
-                       value="<?= (int)$resubmitSubmissionId ?>">
-                <input type="hidden" name="items_json" id="items_json">
-
-                <div class="section-box mb-3">
-                    <div class="mini-head">
-                        <div class="mini-icon">
-                            <i data-lucide="clipboard-check"></i>
-                        </div>
-
+            <section class="page-section p-3 p-lg-3">
+                <div class="page-head-card mb-3">
+                    <div class="d-flex flex-column flex-lg-row align-items-lg-center justify-content-lg-between gap-3">
                         <div>
-                            <h2 class="fw-bold fs-6 mb-1">PMS Header</h2>
-                            <p class="text-muted-custom small mb-0">
-                                Report number, version and project-party details.
+                            <h1 class="h4 fw-bold mb-1">PMC Schedules</h1>
+                            <p class="text-muted-custom mb-0 small">
+                                Manage project PMC schedules. Open View to add, edit, delete and bulk-create topics/tasks.
                             </p>
                         </div>
-                    </div>
 
-                    <div class="row g-3">
-                        <div class="col-md-4">
-                            <label class="form-label fw-bold small">PMS No</label>
-                            <input class="form-control rounded-4"
-                                   name="pms_no"
-                                   value="<?= pmsr_e($formData['pms_no']) ?>"
-                                   required>
-                        </div>
+                        <div class="d-flex flex-wrap gap-2">
+                            <a href="pms-export-excel.php?<?= pmc_e(http_build_query($_GET)) ?>"
+                                class="btn btn-outline-success rounded-4 fw-bold btn-sm px-3">
+                                <i data-lucide="file-spreadsheet" style="width:15px;height:15px;"></i> Export Excel
+                            </a>
 
-                        <div class="col-md-4">
-                            <label class="form-label fw-bold small">PMS Date</label>
-                            <input type="date"
-                                   class="form-control rounded-4"
-                                   id="pms_date"
-                                   name="pms_date"
-                                   value="<?= pmsr_e($formData['pms_date']) ?>"
-                                   required>
-                        </div>
+                            <a href="pms-pdf.php?<?= pmc_e(http_build_query(array_merge($_GET, ['print' => 1]))) ?>"
+                                target="_blank"
+                                class="btn btn-outline-danger rounded-4 fw-bold btn-sm px-3">
+                                <i data-lucide="file-text" style="width:15px;height:15px;"></i> Download PDF
+                            </a>
 
-                        <div class="col-md-4">
-                            <label class="form-label fw-bold small">Version</label>
-                            <input class="form-control rounded-4"
-                                   id="version"
-                                   name="version"
-                                   placeholder="e.g. R0, R1, Final"
-                                   value="<?= pmsr_e($formData['version']) ?>">
-                        </div>
-
-                        <div class="col-md-6">
-                            <label class="form-label fw-bold small">Architect</label>
-                            <input class="form-control rounded-4"
-                                   id="architect"
-                                   name="architect"
-                                   placeholder="Enter architect name"
-                                   value="<?= pmsr_e($formData['architect']) ?>">
-                        </div>
-
-                        <div class="col-md-6">
-                            <label class="form-label fw-bold small">PMC</label>
-                            <input class="form-control rounded-4"
-                                   id="pmc"
-                                   name="pmc"
-                                   placeholder="Enter PMC name"
-                                   value="<?= pmsr_e($formData['pmc']) ?>">
+                            <?php if ($canPmcCreate): ?>
+                                <button type="button"
+                                    class="btn brand-gradient text-white rounded-4 fw-bold btn-sm px-3"
+                                    data-bs-toggle="modal"
+                                    data-bs-target="#scheduleModal"
+                                    onclick="openAddScheduleModal()">
+                                    <i data-lucide="calendar-plus" style="width:15px;height:15px;"></i> Add PMC Schedule
+                                </button>
+                            <?php endif; ?>
                         </div>
                     </div>
                 </div>
 
-                <div class="section-box mb-3">
-                    <div class="d-flex justify-content-between align-items-center mb-3">
-                        <div class="mini-head mb-0">
-                            <div class="mini-icon">
-                                <i data-lucide="calendar-range"></i>
+                <div class="row g-3 mb-3 kpi-row">
+                    <div class="col-12 col-sm-6 col-xl-3">
+                        <article class="kpi-card">
+                            <div class="kpi-icon text-white" style="background:linear-gradient(135deg,#818cf8,#2563eb);">
+                                <i data-lucide="calendar-days"></i>
                             </div>
-
                             <div>
-                                <h2 class="fw-bold fs-6 mb-1">
-                                    Schedule Activities
-                                </h2>
-
-                                <p class="text-muted-custom small mb-0">
-                                    Add project tasks, durations, dates and remarks.
-                                </p>
+                                <div class="kpi-label">PMC Schedules <i data-lucide="info" style="width:12px;height:12px;"></i></div>
+                                <p class="kpi-value"><?= (int)$stats["total"] ?></p>
+                                <p class="kpi-sub">Total active schedules</p>
                             </div>
-                        </div>
-
-                        <button type="button"
-                                id="addRow"
-                                class="btn btn-outline-primary rounded-4 fw-bold">
-                            Add Task
-                        </button>
+                        </article>
                     </div>
 
-                    <div class="table-responsive thin-scrollbar">
-                        <table class="table table-bordered pms-table">
-                            <thead>
-                            <tr>
-                                <th>SL</th>
-                                <th>Task / Activity / Milestone</th>
-                                <th>Duration Days</th>
-                                <th>Start Date</th>
-                                <th>End Date</th>
-                                <th>Remark</th>
-                                <th>Del</th>
-                            </tr>
-                            </thead>
+                    <div class="col-12 col-sm-6 col-xl-3">
+                        <article class="kpi-card">
+                            <div class="kpi-icon bg-success-subtle text-success">
+                                <i data-lucide="activity"></i>
+                            </div>
+                            <div>
+                                <div class="kpi-label">Ongoing <i data-lucide="info" style="width:12px;height:12px;"></i></div>
+                                <p class="kpi-value"><?= (int)$stats["ongoing"] ?></p>
+                                <p class="kpi-sub">Running schedules</p>
+                            </div>
+                        </article>
+                    </div>
 
-                            <tbody id="pmsBody"></tbody>
+                    <div class="col-12 col-sm-6 col-xl-3">
+                        <article class="kpi-card">
+                            <div class="kpi-icon bg-warning-subtle text-warning">
+                                <i data-lucide="clock-3"></i>
+                            </div>
+                            <div>
+                                <div class="kpi-label">Pending/Draft <i data-lucide="info" style="width:12px;height:12px;"></i></div>
+                                <p class="kpi-value"><?= (int)$stats["pending"] ?></p>
+                                <p class="kpi-sub">Planning schedules</p>
+                            </div>
+                        </article>
+                    </div>
+
+                    <div class="col-12 col-sm-6 col-xl-3">
+                        <article class="kpi-card">
+                            <div class="kpi-icon text-white" style="background:linear-gradient(135deg,#8b5cf6,#6366f1);">
+                                <i data-lucide="badge-check"></i>
+                            </div>
+                            <div>
+                                <div class="kpi-label">Completed <i data-lucide="info" style="width:12px;height:12px;"></i></div>
+                                <p class="kpi-value"><?= (int)$stats["completed"] ?></p>
+                                <p class="kpi-sub">Completed schedules</p>
+                            </div>
+                        </article>
+                    </div>
+                </div>
+
+                <form method="GET" class="filter-card mb-3">
+                    <input type="hidden" name="per_page" value="<?= (int)$perPage ?>">
+                    <div class="row g-2 align-items-end">
+                        <div class="col-12 col-lg-4">
+                            <label class="form-label fw-bold small">Search</label>
+                            <input type="text" name="search" class="form-control rounded-4" value="<?= pmc_e($search) ?>" placeholder="Schedule, project, code, location">
+                        </div>
+
+                        <div class="col-12 col-sm-6 col-lg-3">
+                            <label class="form-label fw-bold small">Project</label>
+                            <select name="project_id" class="form-select rounded-4">
+                                <option value="0">All Projects</option>
+                                <?php while ($project = mysqli_fetch_assoc($projectsQ)): ?>
+                                    <option value="<?= (int)$project["id"] ?>" <?= (int)$projectFilter === (int)$project["id"] ? "selected" : "" ?>>
+                                        <?= pmc_e($project["project_name"]) ?> <?= $project["project_code"] ? "(" . pmc_e($project["project_code"]) . ")" : "" ?>
+                                    </option>
+                                <?php endwhile; ?>
+                            </select>
+                        </div>
+
+                        <div class="col-12 col-sm-6 col-lg-3">
+                            <label class="form-label fw-bold small">Status</label>
+                            <select name="schedule_status" class="form-select rounded-4">
+                                <option value="">All Status</option>
+                                <option value="draft" <?= $statusFilter === "draft" ? "selected" : "" ?>>Draft</option>
+                                <option value="pending" <?= $statusFilter === "pending" ? "selected" : "" ?>>Pending</option>
+                                <option value="ongoing" <?= $statusFilter === "ongoing" ? "selected" : "" ?>>Ongoing</option>
+                                <option value="completed" <?= $statusFilter === "completed" ? "selected" : "" ?>>Completed</option>
+                            </select>
+                        </div>
+
+                        <div class="col-12 col-lg-2 d-flex gap-2">
+                            <button type="submit" class="btn brand-gradient text-white rounded-4 fw-bold w-100">Filter</button>
+                            <a href="pms.php" class="btn btn-outline-secondary rounded-4 fw-bold">Reset</a>
+                        </div>
+                    </div>
+                </form>
+
+                <section class="card-ui overflow-hidden">
+                    <div class="p-3 p-lg-4 d-flex flex-column flex-lg-row align-items-lg-center justify-content-lg-between gap-3">
+                        <div>
+                            <h2 class="fw-bold fs-6 mb-1">PMC Schedules List</h2>
+                            <p class="text-muted-custom small mb-0">Use View to manage detailed topic hierarchy.</p>
+                        </div>
+                    </div>
+
+                    <div class="d-none d-md-block overflow-auto thin-scrollbar px-3 px-lg-4 pb-3">
+                        <table class="project-table w-100">
+                            <thead>
+                                <tr>
+                                    <th>Schedule</th>
+                                    <th>Project</th>
+                                    <th>Dates</th>
+                                    <th>Days</th>
+                                    <th>Items</th>
+                                    <th>Progress</th>
+                                    <th>Status</th>
+                                    <th style="width:220px;">Action</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <?php foreach ($schedules as $schedule): ?>
+                                    <?php $scheduleJson = htmlspecialchars(json_encode($schedule, JSON_HEX_APOS | JSON_HEX_QUOT), ENT_QUOTES, "UTF-8"); ?>
+                                    <tr>
+                                        <td>
+                                            <div class="fw-bold"><?= pmc_e($schedule["schedule_name"]) ?></div>
+                                            <small class="text-muted-custom">#<?= (int)$schedule["id"] ?></small>
+                                        </td>
+                                        <td>
+                                            <div class="fw-bold"><?= pmc_e($schedule["project_name"]) ?></div>
+                                            <small class="text-muted-custom"><?= pmc_e($schedule["project_code"] ?: "-") ?> · <?= pmc_e($schedule["project_location"] ?: "-") ?></small>
+                                        </td>
+                                        <td>
+                                            <div class="fw-bold"><?= pmc_e(pmc_date_show($schedule["overall_start_date"])) ?></div>
+                                            <small class="text-muted-custom">to <?= pmc_e(pmc_date_show($schedule["overall_end_date"])) ?></small>
+                                        </td>
+                                        <td class="fw-bold"><?= (int)$schedule["overall_duration_days"] ?></td>
+                                        <td>
+                                            <div class="fw-bold"><?= (int)$schedule["total_items"] ?></div>
+                                            <small class="text-muted-custom"><?= (int)$schedule["topic_count"] ?> topics · <?= (int)$schedule["task_count"] ?> tasks</small>
+                                        </td>
+                                        <td>
+                                            <div class="progress progress-mini">
+                                                <div class="progress-bar" style="width: <?= (float)($schedule["avg_progress"] ?? 0) ?>%;"></div>
+                                            </div>
+                                            <small class="text-muted-custom fw-bold"><?= (float)($schedule["avg_progress"] ?? 0) ?>%</small>
+                                        </td>
+                                        <td>
+                                            <span class="status-pill <?= pmc_status_class($schedule["schedule_status"]) ?>">
+                                                <?= pmc_e($schedule["schedule_status"]) ?>
+                                            </span>
+                                        </td>
+                                        <td>
+                                            <div class="d-flex flex-wrap gap-1">
+                                                <a href="pms-detail.php?schedule_id=<?= (int)$schedule["id"] ?>" class="btn btn-sm btn-outline-success rounded-4 fw-bold">View</a>
+
+                                                <?php if ($canPmcEdit): ?>
+                                                    <button type="button"
+                                                        class="btn btn-sm btn-outline-primary rounded-4 fw-bold"
+                                                        data-bs-toggle="modal"
+                                                        data-bs-target="#scheduleModal"
+                                                        onclick='openEditScheduleModal(<?= $scheduleJson ?>)'>Edit</button>
+                                                <?php endif; ?>
+
+                                                <?php if ($canPmcDelete): ?>
+                                                    <button type="button"
+                                                        class="btn btn-sm btn-outline-danger rounded-4 fw-bold"
+                                                        data-bs-toggle="modal"
+                                                        data-bs-target="#cancelScheduleModal"
+                                                        onclick='openCancelScheduleModal(<?= $scheduleJson ?>)'>Cancel</button>
+                                                <?php endif; ?>
+                                            </div>
+                                        </td>
+                                    </tr>
+                                <?php endforeach; ?>
+
+                                <?php if (empty($schedules)): ?>
+                                    <tr>
+                                        <td colspan="8" class="text-center text-muted-custom py-4">No PMC schedules found.</td>
+                                    </tr>
+                                <?php endif; ?>
+                            </tbody>
                         </table>
                     </div>
 
-                    <div class="mt-3">
-                        <label class="form-label fw-bold small">
-                            General Remarks
-                        </label>
-
-                        <textarea class="form-control rounded-4"
-                                  id="remarks"
-                                  name="remarks"
-                                  rows="3"
-                                  placeholder="Enter overall schedule remarks"><?= pmsr_e($formData['remarks']) ?></textarea>
-                    </div>
-                </div>
-
-                <div class="section-box mb-3">
-                    <div class="d-flex justify-content-end">
-                        <button type="submit"
-                                class="btn brand-gradient text-white rounded-4 fw-bold px-4"
-                                <?= !$project ? 'disabled' : '' ?>>
-                            <?= $resubmitSubmissionId > 0
-                                ? 'Resubmit PMS'
-                                : 'Submit PMS' ?>
-                        </button>
-                    </div>
-                </div>
-            </form>
-
-            <section class="card-ui overflow-hidden">
-                <div class="p-3 p-lg-4">
-                    <h2 class="fw-bold fs-6 mb-1">Recent PMS</h2>
-                    <p class="text-muted-custom small mb-0">
-                        Your latest Project Master Schedule submissions.
-                    </p>
-                </div>
-
-                <div class="px-3 px-lg-4 pb-4">
-                    <div class="row g-2">
-                        <?php foreach ($recent as $recentRow): ?>
-                            <div class="col-md-6 col-xl-4">
-                                <div class="recent-card">
-                                    <div class="fw-bold">
-                                        <?= pmsr_e($recentRow['pms_no']) ?>
+                    <div class="d-md-none px-3 px-lg-4 pb-3 d-grid gap-3">
+                        <?php foreach ($schedules as $schedule): ?>
+                            <?php $scheduleJson = htmlspecialchars(json_encode($schedule, JSON_HEX_APOS | JSON_HEX_QUOT), ENT_QUOTES, "UTF-8"); ?>
+                            <article class="mobile-project-card">
+                                <div class="d-flex justify-content-between align-items-start gap-3 mb-2">
+                                    <div>
+                                        <p class="fw-bold small mb-1"><?= pmc_e($schedule["schedule_name"]) ?></p>
+                                        <small class="text-muted-custom"><?= pmc_e($schedule["project_name"]) ?></small>
                                     </div>
-
-                                    <small class="text-muted-custom">
-                                        <?= pmsr_e($recentRow['project_name']) ?>
-                                        ·
-                                        <?= pmsr_e(date(
-                                            'd M Y',
-                                            strtotime($recentRow['pms_date'])
-                                        )) ?>
-                                        ·
-                                        <?= (int)$recentRow['task_count'] ?> task(s)
-                                    </small>
-
-                                    <br>
-
-                                    <a class="btn btn-sm btn-outline-primary rounded-4 fw-bold mt-2"
-                                       target="_blank"
-                                       href="reports-print/report-pms-print.php?view=<?= (int)$recentRow['id'] ?>">
-                                        Print
-                                    </a>
+                                    <span class="status-pill <?= pmc_status_class($schedule["schedule_status"]) ?>">
+                                        <?= pmc_e($schedule["schedule_status"]) ?>
+                                    </span>
                                 </div>
-                            </div>
+
+                                <div class="mobile-info"><span>Days</span><span><?= (int)$schedule["overall_duration_days"] ?></span></div>
+                                <div class="mobile-info"><span>Start</span><span><?= pmc_e(pmc_date_show($schedule["overall_start_date"])) ?></span></div>
+                                <div class="mobile-info"><span>Finish</span><span><?= pmc_e(pmc_date_show($schedule["overall_end_date"])) ?></span></div>
+                                <div class="mobile-info"><span>Items</span><span><?= (int)$schedule["total_items"] ?></span></div>
+
+                                <div class="mt-3 d-flex flex-wrap gap-2">
+                                    <a href="pms-detail.php?schedule_id=<?= (int)$schedule["id"] ?>" class="btn btn-sm btn-outline-success rounded-4 fw-bold">View</a>
+
+                                    <?php if ($canPmcEdit): ?>
+                                        <button type="button" class="btn btn-sm btn-outline-primary rounded-4 fw-bold"
+                                            data-bs-toggle="modal" data-bs-target="#scheduleModal"
+                                            onclick='openEditScheduleModal(<?= $scheduleJson ?>)'>Edit</button>
+                                    <?php endif; ?>
+
+                                    <?php if ($canPmcDelete): ?>
+                                        <button type="button" class="btn btn-sm btn-outline-danger rounded-4 fw-bold"
+                                            data-bs-toggle="modal" data-bs-target="#cancelScheduleModal"
+                                            onclick='openCancelScheduleModal(<?= $scheduleJson ?>)'>Cancel</button>
+                                    <?php endif; ?>
+                                </div>
+                            </article>
                         <?php endforeach; ?>
                     </div>
-                </div>
+
+                    <div class="pagination-wrap">
+                        <div class="d-flex flex-column flex-lg-row align-items-lg-center justify-content-lg-between gap-3">
+                            <div class="d-flex align-items-center gap-2 flex-wrap">
+                                <span class="text-muted-custom small fw-bold">
+                                    Showing <?= (int)$fromRow ?> to <?= (int)$toRow ?> of <?= (int)$totalRows ?> schedules
+                                </span>
+
+                                <select class="form-select per-page-select" onchange="window.location.href=this.value">
+                                    <?php foreach ($allowedPerPage as $limit): ?>
+                                        <option value="<?= pmc_e(pmc_per_page_url($limit)) ?>" <?= $perPage === $limit ? "selected" : "" ?>>
+                                            <?= (int)$limit ?>
+                                        </option>
+                                    <?php endforeach; ?>
+                                </select>
+                            </div>
+
+                            <div class="d-flex align-items-center gap-2 flex-wrap">
+                                <a class="page-link-custom <?= $page <= 1 ? 'disabled' : '' ?>" href="<?= pmc_e(pmc_page_url(1)) ?>">First</a>
+                                <a class="page-link-custom <?= $page <= 1 ? 'disabled' : '' ?>" href="<?= pmc_e(pmc_page_url(max(1, $page - 1))) ?>">
+                                    <i data-lucide="chevron-left" style="width:15px;height:15px;"></i>
+                                </a>
+
+                                <?php
+                                $startPage = max(1, $page - 2);
+                                $endPage = min($totalPages, $page + 2);
+                                for ($i = $startPage; $i <= $endPage; $i++):
+                                ?>
+                                    <a class="page-link-custom <?= $i === $page ? 'active' : '' ?>" href="<?= pmc_e(pmc_page_url($i)) ?>">
+                                        <?= (int)$i ?>
+                                    </a>
+                                <?php endfor; ?>
+
+                                <a class="page-link-custom <?= $page >= $totalPages ? 'disabled' : '' ?>" href="<?= pmc_e(pmc_page_url(min($totalPages, $page + 1))) ?>">
+                                    <i data-lucide="chevron-right" style="width:15px;height:15px;"></i>
+                                </a>
+                                <a class="page-link-custom <?= $page >= $totalPages ? 'disabled' : '' ?>" href="<?= pmc_e(pmc_page_url($totalPages)) ?>">Last</a>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <?php include("includes/footer.php"); ?>
             </section>
+        </main>
 
-            <?php include 'includes/footer.php'; ?>
-        </section>
-    </main>
+        <div id="settingsOverlay"></div>
+        <?php include("includes/rightsidbar.php"); ?>
+    </div>
 
-    <div id="settingsOverlay"></div>
-    <?php include 'includes/rightsidbar.php'; ?>
-</div>
+    <?php if ($canPmcCreate || $canPmcEdit): ?>
+        <div class="modal fade" id="scheduleModal" tabindex="-1" aria-hidden="true">
+            <div class="modal-dialog modal-dialog-centered modal-lg">
+                <form method="POST" class="modal-content">
+                    <input type="hidden" name="action" value="save_schedule">
+                    <input type="hidden" name="schedule_id" id="schedule_id">
 
-<?php include 'includes/script.php'; ?>
-<script src="assets/js/script.js?v=49"></script>
+                    <div class="modal-header px-4">
+                        <div>
+                            <h5 class="modal-title fw-bold" id="scheduleModalTitle">Add PMC Schedule</h5>
+                            <p class="text-muted-custom small mb-0">Create or update PMC schedule for a project.</p>
+                        </div>
+                        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                    </div>
 
-<script>
-const initialItems =
-    <?= json_encode(
-        $formData['items'],
-        JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES
-    ) ?>;
+                    <div class="modal-body px-4">
+                        <div class="row g-3">
+                            <div class="col-md-6">
+                                <label class="form-label fw-bold small">Project <span class="text-danger">*</span></label>
+                                <select name="project_id" id="schedule_project_id" class="form-select rounded-4" required>
+                                    <option value="">Select Project</option>
+                                    <?php while ($project = mysqli_fetch_assoc($projectsModalQ)): ?>
+                                        <option value="<?= (int)$project["id"] ?>">
+                                            <?= pmc_e($project["project_name"]) ?> <?= $project["project_code"] ? "(" . pmc_e($project["project_code"]) . ")" : "" ?>
+                                        </option>
+                                    <?php endwhile; ?>
+                                </select>
+                            </div>
 
-const previousData =
-    <?= json_encode(
-        $previousPayload,
-        JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES
-    ) ?>;
+                            <div class="col-md-6">
+                                <label class="form-label fw-bold small">Schedule Name <span class="text-danger">*</span></label>
+                                <input type="text" name="schedule_name" id="schedule_name" class="form-control rounded-4" required placeholder="PMC Schedule">
+                            </div>
 
-const pmsBody = document.getElementById('pmsBody');
+                            <div class="col-md-6">
+                                <label class="form-label fw-bold small">Schedule Status</label>
+                                <select name="schedule_status" id="schedule_status_modal" class="form-select rounded-4">
+                                    <option value="draft">Draft</option>
+                                    <option value="pending">Pending</option>
+                                    <option value="ongoing">Ongoing</option>
+                                    <option value="completed">Completed</option>
+                                    <option value="cancelled">Cancelled</option>
+                                </select>
+                            </div>
 
-const snapshot = {
-    architect: document.getElementById('architect')?.value || '',
-    pmc: document.getElementById('pmc')?.value || '',
-    version: document.getElementById('version')?.value || 'R0',
-    remarks: document.getElementById('remarks')?.value || '',
-    items: initialItems
-};
+                            <div class="col-12">
+                                <label class="form-label fw-bold small">Description</label>
+                                <textarea name="description" id="schedule_description" rows="3" class="form-control rounded-4"></textarea>
+                            </div>
+                        </div>
+                    </div>
 
-function escapeHtml(value) {
-    return String(value ?? '')
-        .replaceAll('&', '&amp;')
-        .replaceAll('<', '&lt;')
-        .replaceAll('>', '&gt;')
-        .replaceAll('"', '&quot;')
-        .replaceAll("'", '&#039;');
-}
+                    <div class="modal-footer px-4">
+                        <button type="button" class="btn btn-outline-secondary rounded-4 fw-bold" data-bs-dismiss="modal">Cancel</button>
+                        <button type="submit" class="btn brand-gradient text-white rounded-4 fw-bold px-4" id="scheduleSubmitBtn">Save Schedule</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    <?php endif; ?>
 
-function calculateEndDate(row) {
-    const start = row.querySelector('.date-start').value;
-    const duration = parseInt(
-        row.querySelector('.duration').value || '0',
-        10
-    );
+    <?php if ($canPmcDelete): ?>
+        <div class="modal fade" id="cancelScheduleModal" tabindex="-1" aria-hidden="true">
+            <div class="modal-dialog modal-dialog-centered">
+                <form method="POST" class="modal-content">
+                    <input type="hidden" name="action" value="cancel_schedule">
+                    <input type="hidden" name="schedule_id" id="cancel_schedule_id">
 
-    const end = row.querySelector('.date-end');
+                    <div class="modal-header px-4">
+                        <div>
+                            <h5 class="modal-title fw-bold">Cancel PMC Schedule</h5>
+                            <p class="text-muted-custom small mb-0">This marks the PMC schedule as cancelled.</p>
+                        </div>
+                        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                    </div>
 
-    if (!start || duration <= 0) {
-        end.value = '';
-        return;
-    }
+                    <div class="modal-body px-4">
+                        <div class="alert alert-danger rounded-4 mb-0">
+                            <p class="fw-bold mb-1" id="cancel_schedule_title">Cancel this schedule?</p>
+                            <p class="small mb-0">Cancelled schedules will not show in the active list.</p>
+                        </div>
+                    </div>
 
-    const date = new Date(start + 'T00:00:00');
-    date.setDate(date.getDate() + duration - 1);
-    end.value = date.toISOString().slice(0, 10);
-}
+                    <div class="modal-footer px-4">
+                        <button type="button" class="btn btn-outline-secondary rounded-4 fw-bold" data-bs-dismiss="modal">Cancel</button>
+                        <button type="submit" class="btn btn-danger rounded-4 fw-bold px-4">Cancel Schedule</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    <?php endif; ?>
 
-function addRow(values = {}) {
-    const row = document.createElement('tr');
+    <?php include("includes/script.php") ?>
+    <script src="assets/js/script.js?v=60"></script>
 
-    row.innerHTML = `
-        <td class="sl text-center fw-bold"></td>
+    <script>
+        function openAddScheduleModal() {
+            document.getElementById("scheduleModalTitle").textContent = "Add PMC Schedule";
+            document.getElementById("scheduleSubmitBtn").textContent = "Save Schedule";
+            document.getElementById("schedule_id").value = "";
+            document.getElementById("schedule_project_id").value = "";
+            document.getElementById("schedule_name").value = "";
+            document.getElementById("schedule_status_modal").value = "draft";
+            document.getElementById("schedule_description").value = "";
+        }
 
-        <td>
-            <input class="form-control rounded-4 task"
-                   placeholder="Enter task, activity or milestone"
-                   value="${escapeHtml(values.task_activity || '')}">
-        </td>
+        function openEditScheduleModal(schedule) {
+            document.getElementById("scheduleModalTitle").textContent = "Edit PMC Schedule";
+            document.getElementById("scheduleSubmitBtn").textContent = "Update Schedule";
+            document.getElementById("schedule_id").value = schedule.id || "";
+            document.getElementById("schedule_project_id").value = schedule.project_id || "";
+            document.getElementById("schedule_name").value = schedule.schedule_name || "";
+            document.getElementById("schedule_status_modal").value = schedule.schedule_status || "draft";
+            document.getElementById("schedule_description").value = schedule.description || "";
+        }
 
-        <td>
-            <input type="number"
-                   class="form-control rounded-4 duration"
-                   min="0"
-                   placeholder="Days"
-                   value="${escapeHtml(values.duration_days || 0)}">
-        </td>
+        function openCancelScheduleModal(schedule) {
+            document.getElementById("cancel_schedule_id").value = schedule.id || "";
+            document.getElementById("cancel_schedule_title").textContent = "Cancel " + (schedule.schedule_name || "this schedule") + "?";
+        }
 
-        <td>
-            <input type="date"
-                   class="form-control rounded-4 date-start"
-                   value="${escapeHtml(values.date_start || '')}">
-        </td>
-
-        <td>
-            <input type="date"
-                   class="form-control rounded-4 date-end"
-                   value="${escapeHtml(values.date_end || '')}"
-                   readonly>
-        </td>
-
-        <td>
-            <input class="form-control rounded-4 remark"
-                   placeholder="Enter remark"
-                   value="${escapeHtml(values.remark || '')}">
-        </td>
-
-        <td class="text-center">
-            <button type="button"
-                    class="btn btn-sm btn-outline-danger rounded-4 delete-row">
-                <i data-lucide="trash-2"></i>
-            </button>
-        </td>
-    `;
-
-    pmsBody.appendChild(row);
-
-    row.querySelector('.date-start')
-        .addEventListener('change', () => calculateEndDate(row));
-
-    row.querySelector('.duration')
-        .addEventListener('input', () => calculateEndDate(row));
-
-    renumberRows();
-}
-
-function renumberRows() {
-    [...pmsBody.rows].forEach((row, index) => {
-        row.querySelector('.sl').textContent = index + 1;
-    });
-
-    if (window.lucide) {
-        window.lucide.createIcons();
-    }
-}
-
-function loadSource(source) {
-    document.getElementById('architect').value =
-        source?.architect || '';
-
-    document.getElementById('pmc').value =
-        source?.pmc || '';
-
-    document.getElementById('version').value =
-        source?.version || 'R0';
-
-    document.getElementById('remarks').value =
-        source?.remarks || '';
-
-    pmsBody.innerHTML = '';
-
-    const items = source?.items?.length
-        ? source.items
-        : [{}];
-
-    items.forEach(addRow);
-}
-
-initialItems.forEach(addRow);
-
-document.getElementById('addRow')
-    ?.addEventListener('click', () => addRow({}));
-
-document.addEventListener('click', event => {
-    const button = event.target.closest('.delete-row');
-
-    if (!button) {
-        return;
-    }
-
-    const row = button.closest('tr');
-
-    if (pmsBody.rows.length <= 1) {
-        row.querySelectorAll('input').forEach(input => {
-            input.value = input.classList.contains('duration')
-                ? '0'
-                : '';
+        window.addEventListener("load", function () {
+            if (window.lucide && typeof window.lucide.createIcons === "function") {
+                window.lucide.createIcons();
+            }
         });
-    } else {
-        row.remove();
-    }
-
-    renumberRows();
-});
-
-document.getElementById('loadPrevious')
-    ?.addEventListener('change', function () {
-        loadSource(
-            this.checked
-                ? previousData
-                : snapshot
-        );
-    });
-
-document.getElementById('projectPicker')
-    ?.addEventListener('change', function () {
-        const date =
-            document.getElementById('pms_date')?.value
-            || '<?= pmsr_e($reportDate) ?>';
-
-        window.location.href = this.value
-            ? 'pms.php?project_id='
-                + encodeURIComponent(this.value)
-                + '&report_date='
-                + encodeURIComponent(date)
-            : 'pms.php';
-    });
-
-document.getElementById('pmsForm')
-    ?.addEventListener('submit', function () {
-        const items = [...pmsBody.rows].map((row, index) => ({
-            sl_no: index + 1,
-            task_activity:
-                row.querySelector('.task').value,
-            duration_days:
-                Number(row.querySelector('.duration').value || 0),
-            date_start:
-                row.querySelector('.date-start').value,
-            date_end:
-                row.querySelector('.date-end').value,
-            remark:
-                row.querySelector('.remark').value
-        }));
-
-        document.getElementById('items_json').value =
-            JSON.stringify(items);
-    });
-</script>
+    </script>
 </body>
+
 </html>

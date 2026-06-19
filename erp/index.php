@@ -1,4 +1,5 @@
 <?php
+if (session_status() === PHP_SESSION_NONE) { session_start(); }
 require_once __DIR__ . "/includes/db.php";
 
 require_permission($conn, "can_view", "index.php");
@@ -12,6 +13,37 @@ require_permission($conn, "can_view", "index.php");
   <title>TEK-C PMC Construction - Admin Dashboard</title>
 
   <?php include("includes/links.php") ?>
+
+  <style>
+    .urgent-float-btn{
+      position:fixed;right:24px;bottom:24px;z-index:1050;border:0;border-radius:999px;
+      background:linear-gradient(135deg,#ef4444,#f59e0b);color:#fff;font-weight:900;
+      padding:12px 18px;box-shadow:0 18px 40px rgba(239,68,68,.25);display:flex;align-items:center;gap:8px;
+    }
+    .urgent-modal .modal-content{border:0;border-radius:24px;box-shadow:0 24px 80px rgba(15,23,42,.22);overflow:hidden}
+    .urgent-modal-head{background:linear-gradient(135deg,#0f172a,#334155);color:#fff;padding:20px}
+    .urgent-tabs{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px}
+    .urgent-tab{border:1px solid var(--border-soft);background:var(--card-bg);border-radius:999px;padding:7px 13px;font-weight:900;font-size:13px;color:var(--text-main);cursor:pointer}
+    .urgent-tab.active{background:#fbbf24;border-color:#fbbf24;color:#fff}
+    .urgent-box{border:1px solid var(--border-soft);border-radius:18px;padding:13px;background:rgba(148,163,184,.06);margin-bottom:10px}
+    .urgent-box.critical{background:rgba(239,68,68,.07);border-color:rgba(239,68,68,.30)}
+    .urgent-box.urgent{background:rgba(245,158,11,.08);border-color:rgba(245,158,11,.30)}
+    .urgent-chip{display:inline-flex;align-items:center;border-radius:999px;padding:5px 10px;font-size:12px;font-weight:900}
+    .urgent-chip.critical{background:rgba(239,68,68,.14);color:#dc2626}
+    .urgent-chip.urgent{background:rgba(245,158,11,.16);color:#b45309}
+    .urgent-chip.pms{background:rgba(59,130,246,.12);color:#2563eb}
+    .urgent-title{font-weight:900;color:var(--text-main);line-height:1.35}
+    .urgent-meta{color:var(--text-muted);font-size:12px;font-weight:800;line-height:1.55}
+    .urgent-message{font-weight:700;color:var(--text-main);white-space:pre-wrap;line-height:1.5}
+    .urgent-pane{display:none}
+    .urgent-pane.active{display:block}
+    @media(max-width:767px){
+      .urgent-float-btn{right:14px;bottom:14px;padding:10px 13px;font-size:13px}
+      .urgent-modal .modal-dialog{margin:8px}
+      .urgent-modal-head{padding:16px}
+    }
+  </style>
+
   
 </head>
 
@@ -30,6 +62,135 @@ require_permission($conn, "can_view", "index.php");
         $canDashboardView = can_view($conn, "index.php");
         $canProjectsView = can_view($conn, "projects.php");
         $canBillingView = can_view($conn, "billing.php");
+
+        function dashboard_table_exists($conn, $table) {
+          $table = preg_replace('/[^a-zA-Z0-9_]/', '', (string)$table);
+          $q = mysqli_query($conn, "SHOW TABLES LIKE '" . mysqli_real_escape_string($conn, $table) . "'");
+          return $q && mysqli_num_rows($q) > 0;
+        }
+
+        function dashboard_col_exists($conn, $table, $col) {
+          $table = preg_replace('/[^a-zA-Z0-9_]/', '', (string)$table);
+          $col = mysqli_real_escape_string($conn, (string)$col);
+          $q = mysqli_query($conn, "SHOW COLUMNS FROM `$table` LIKE '$col'");
+          return $q && mysqli_num_rows($q) > 0;
+        }
+
+        function dashboard_emp_id($conn) {
+          if (!empty($_SESSION['employee_id'])) return (int)$_SESSION['employee_id'];
+          $uid = (int)($_SESSION['user_id'] ?? 0);
+
+          if ($uid > 0 && dashboard_table_exists($conn, 'users') && dashboard_col_exists($conn, 'users', 'employee_id')) {
+            $q = mysqli_query($conn, "SELECT employee_id FROM users WHERE id=$uid LIMIT 1");
+            if ($q && ($r = mysqli_fetch_assoc($q)) && !empty($r['employee_id'])) return (int)$r['employee_id'];
+          }
+
+          if ($uid > 0 && dashboard_table_exists($conn, 'employees') && dashboard_col_exists($conn, 'employees', 'user_id')) {
+            $q = mysqli_query($conn, "SELECT id FROM employees WHERE user_id=$uid LIMIT 1");
+            if ($q && ($r = mysqli_fetch_assoc($q))) return (int)$r['id'];
+          }
+
+          return 0;
+        }
+
+        function dashboard_is_super_admin($conn) {
+          if (!empty($_SESSION['role_name']) && strtolower((string)$_SESSION['role_name']) === 'super admin') return true;
+          if (!empty($_SESSION['role']) && strtolower((string)$_SESSION['role']) === 'super admin') return true;
+
+          $uid = (int)($_SESSION['user_id'] ?? 0);
+          if ($uid <= 0 || !dashboard_table_exists($conn, 'user_roles') || !dashboard_table_exists($conn, 'roles')) return false;
+
+          $slugSql = dashboard_col_exists($conn, 'roles', 'role_slug') ? " OR LOWER(COALESCE(r.role_slug,''))='super-admin' " : "";
+          $q = mysqli_query($conn, "
+            SELECT r.id
+            FROM user_roles ur
+            INNER JOIN roles r ON r.id=ur.role_id
+            WHERE ur.user_id=$uid
+              AND (r.id=1 OR LOWER(COALESCE(r.role_name,''))='super admin' $slugSql)
+            LIMIT 1
+          ");
+
+          return $q && mysqli_num_rows($q) > 0;
+        }
+
+        function dashboard_short($text, $limit = 110) {
+          $text = trim((string)$text);
+          if (strlen($text) <= $limit) return $text;
+          return substr($text, 0, $limit) . '...';
+        }
+
+        $dashboardEmployeeId = dashboard_emp_id($conn);
+        $dashboardIsSuperAdmin = dashboard_is_super_admin($conn);
+        $assignedProjectIds = [];
+
+        if (!$dashboardIsSuperAdmin && $dashboardEmployeeId > 0 && dashboard_table_exists($conn, 'project_assignments')) {
+          $assignQ = mysqli_query($conn, "SELECT DISTINCT project_id FROM project_assignments WHERE employee_id=$dashboardEmployeeId AND status='active'");
+          while ($assignQ && ($ar = mysqli_fetch_assoc($assignQ))) $assignedProjectIds[] = (int)$ar['project_id'];
+        }
+
+        $hasAssignedProjects = count($assignedProjectIds) > 0;
+        $assignedProjectSql = $hasAssignedProjects ? implode(',', array_map('intval', $assignedProjectIds)) : '';
+
+        $urgentVendorRemarks = [];
+        if (dashboard_table_exists($conn, 'project_vendor_finalization_remarks')) {
+          $projectAccessSql = $hasAssignedProjects ? "AND vr.project_id IN ($assignedProjectSql)" : "";
+          $remarkQ = mysqli_query($conn, "
+            SELECT
+              vr.id,
+              vr.project_id,
+              vr.pms_item_id,
+              vr.package_title,
+              vr.urgency,
+              vr.remark,
+              vr.created_at,
+              p.project_name,
+              p.project_code,
+              COALESCE(e.full_name,u.username,'Employee') AS employee_name
+            FROM project_vendor_finalization_remarks vr
+            LEFT JOIN projects p ON p.id=vr.project_id
+            LEFT JOIN users u ON u.id=vr.created_by
+            LEFT JOIN employees e ON e.id=u.employee_id
+            WHERE vr.urgency IN ('urgent','critical')
+              $projectAccessSql
+            ORDER BY FIELD(vr.urgency,'critical','urgent','normal'), vr.created_at DESC, vr.id DESC
+            LIMIT 8
+          ");
+          while ($remarkQ && ($rr = mysqli_fetch_assoc($remarkQ))) $urgentVendorRemarks[] = $rr;
+        }
+
+        $urgentPmsItems = [];
+        if (dashboard_table_exists($conn, 'project_pmc_schedule_items')) {
+          $projectAccessSql = $hasAssignedProjects ? "AND task.project_id IN ($assignedProjectSql)" : "";
+          $pmsQ = mysqli_query($conn, "
+            SELECT
+              task.id,
+              task.project_id,
+              task.schedule_id,
+              task.title,
+              task.planned_start_date,
+              task.planned_end_date,
+              task.duration_days,
+              task.item_status,
+              task.progress_percent,
+              p.project_name,
+              p.project_code,
+              topic.title AS topic_title
+            FROM project_pmc_schedule_items task
+            LEFT JOIN project_pmc_schedule_items topic ON topic.id=task.parent_id
+            LEFT JOIN projects p ON p.id=task.project_id
+            WHERE task.is_active=1
+              AND task.item_type='task'
+              AND COALESCE(task.item_status,'pending') <> 'completed'
+              AND task.planned_end_date IS NOT NULL
+              AND task.planned_end_date <= DATE_ADD(CURDATE(), INTERVAL 7 DAY)
+              $projectAccessSql
+            ORDER BY task.planned_end_date ASC, p.project_name ASC
+            LIMIT 10
+          ");
+          while ($pmsQ && ($pr = mysqli_fetch_assoc($pmsQ))) $urgentPmsItems[] = $pr;
+        }
+
+        $showUrgentPopup = (count($urgentVendorRemarks) + count($urgentPmsItems)) > 0;
         ?>
         <div class="row g-3 mt-2 kpi-row">
           <div class="col-12 col-sm-6 col-lg-4 col-xxl">
@@ -308,8 +469,128 @@ require_permission($conn, "can_view", "index.php");
     <div id="settingsOverlay"></div>
     <?php include("includes/rightsidbar.php") ?>
   </div>
+
+  <?php if($showUrgentPopup): ?>
+    <button type="button" class="urgent-float-btn" data-bs-toggle="modal" data-bs-target="#urgentInfoModal">
+      <i data-lucide="alert-triangle" style="width:18px;height:18px;"></i>
+      Urgent Info <?= (int)(count($urgentVendorRemarks) + count($urgentPmsItems)) ?>
+    </button>
+
+    <div class="modal fade urgent-modal" id="urgentInfoModal" tabindex="-1" aria-hidden="true">
+      <div class="modal-dialog modal-xl modal-dialog-scrollable">
+        <div class="modal-content">
+          <div class="urgent-modal-head">
+            <div class="d-flex justify-content-between align-items-start gap-3">
+              <div>
+                <h5 class="modal-title fw-bold mb-1">Urgent Information</h5>
+                <div class="small opacity-75">Vendor urgent remarks and PMS near/overdue tasks that need attention.</div>
+              </div>
+              <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+          </div>
+
+          <div class="modal-body p-3 p-lg-4">
+            <div class="urgent-tabs">
+              <button type="button" class="urgent-tab active" data-urgent-tab="remarksPane">Urgent Remarks (<?= count($urgentVendorRemarks) ?>)</button>
+              <button type="button" class="urgent-tab" data-urgent-tab="pmsPane">PMS Alerts (<?= count($urgentPmsItems) ?>)</button>
+            </div>
+
+            <div id="remarksPane" class="urgent-pane active">
+              <?php if(!$urgentVendorRemarks): ?>
+                <div class="text-muted-custom fw-bold">No urgent vendor remarks found.</div>
+              <?php endif; ?>
+
+              <?php foreach($urgentVendorRemarks as $rm): ?>
+                <?php $urgencyClass = strtolower($rm['urgency'] ?? 'urgent') === 'critical' ? 'critical' : 'urgent'; ?>
+                <div class="urgent-box <?= e($urgencyClass) ?>">
+                  <div class="d-flex justify-content-between align-items-start gap-2 mb-2">
+                    <div>
+                      <div class="urgent-title"><?= e($rm['package_title'] ?: 'Vendor Finalization') ?></div>
+                      <div class="urgent-meta"><?= e($rm['project_name'] ?: '-') ?><?= !empty($rm['project_code']) ? ' · '.e($rm['project_code']) : '' ?></div>
+                    </div>
+                    <span class="urgent-chip <?= e($urgencyClass) ?>"><?= e(ucwords($rm['urgency'] ?: 'urgent')) ?></span>
+                  </div>
+                  <div class="urgent-message"><?= nl2br(e($rm['remark'])) ?></div>
+                  <div class="urgent-meta mt-2">
+                    Posted by <?= e($rm['employee_name'] ?: 'Employee') ?>
+                    · <?= !empty($rm['created_at']) ? e(date('d M Y h:i A', strtotime($rm['created_at']))) : '-' ?>
+                  </div>
+                  <div class="mt-2">
+                    <a class="btn btn-sm btn-outline-primary rounded-4 fw-bold" href="pms-vendor-schedule.php?project_id=<?= (int)$rm['project_id'] ?>#vendor-packages-section">Open Vendor Schedule</a>
+                  </div>
+                </div>
+              <?php endforeach; ?>
+            </div>
+
+            <div id="pmsPane" class="urgent-pane">
+              <?php if(!$urgentPmsItems): ?>
+                <div class="text-muted-custom fw-bold">No near/overdue PMS tasks found.</div>
+              <?php endif; ?>
+
+              <?php foreach($urgentPmsItems as $pms): ?>
+                <?php
+                  $dueTs = !empty($pms['planned_end_date']) ? strtotime($pms['planned_end_date']) : 0;
+                  $isOverdue = $dueTs && $dueTs < strtotime(date('Y-m-d'));
+                ?>
+                <div class="urgent-box <?= $isOverdue ? 'critical' : 'urgent' ?>">
+                  <div class="d-flex justify-content-between align-items-start gap-2 mb-2">
+                    <div>
+                      <div class="urgent-title"><?= e($pms['title'] ?: 'PMS Task') ?></div>
+                      <div class="urgent-meta">
+                        <?= e($pms['project_name'] ?: '-') ?><?= !empty($pms['project_code']) ? ' · '.e($pms['project_code']) : '' ?>
+                        <?= !empty($pms['topic_title']) ? ' · '.e($pms['topic_title']) : '' ?>
+                      </div>
+                    </div>
+                    <span class="urgent-chip <?= $isOverdue ? 'critical' : 'pms' ?>"><?= $isOverdue ? 'Overdue' : 'Near Due' ?></span>
+                  </div>
+                  <div class="urgent-meta">
+                    Required by: <b><?= !empty($pms['planned_end_date']) ? e(date('d M Y', strtotime($pms['planned_end_date']))) : '-' ?></b>
+                    · Progress: <?= (int)($pms['progress_percent'] ?? 0) ?>%
+                    · Status: <?= e(ucwords(str_replace('_',' ', $pms['item_status'] ?: 'pending'))) ?>
+                  </div>
+                  <div class="mt-2">
+                    <a class="btn btn-sm btn-outline-primary rounded-4 fw-bold" href="pms.php?project_id=<?= (int)$pms['project_id'] ?>">Open PMS</a>
+                  </div>
+                </div>
+              <?php endforeach; ?>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  <?php endif; ?>
+
+
   <?php include("includes/script.php") ?>
   <script src="assets/js/script.js?v=20"></script>
+
+  <script>
+    document.addEventListener("DOMContentLoaded", function () {
+      if (window.lucide && window.lucide.createIcons) window.lucide.createIcons();
+
+      document.querySelectorAll("[data-urgent-tab]").forEach(function(btn){
+        btn.addEventListener("click", function(){
+          const target = btn.getAttribute("data-urgent-tab");
+          document.querySelectorAll("[data-urgent-tab]").forEach(b => b.classList.remove("active"));
+          document.querySelectorAll(".urgent-pane").forEach(p => p.classList.remove("active"));
+          btn.classList.add("active");
+          const pane = document.getElementById(target);
+          if (pane) pane.classList.add("active");
+        });
+      });
+
+      const urgentModalEl = document.getElementById("urgentInfoModal");
+      if (urgentModalEl && !sessionStorage.getItem("urgentInfoSeen")) {
+        setTimeout(function(){
+          if (window.bootstrap && bootstrap.Modal) {
+            new bootstrap.Modal(urgentModalEl).show();
+            sessionStorage.setItem("urgentInfoSeen", "1");
+          }
+        }, 700);
+      }
+    });
+  </script>
+
 </body>
 
 </html>
